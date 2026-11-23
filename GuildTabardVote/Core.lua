@@ -1,7 +1,7 @@
 local ADDON_NAME, GTV = ...
 
 GTV.ADDON_NAME = ADDON_NAME
-GTV.VERSION = "0.1.0"
+GTV.VERSION = "0.2.0"
 GTV.PREFIX = "GTV1"
 GTV.MEDIA_PATH = "Interface\\AddOns\\GuildTabardVote\\Media\\"
 
@@ -81,6 +81,16 @@ function GTV:ShortName(name)
     return name:match("^([^%-]+)") or name
 end
 
+function GTV:GetGuildName()
+    if IsInGuild and IsInGuild() then
+        local g = GetGuildInfo and GetGuildInfo("player")
+        if g and g ~= "" then
+            return g
+        end
+    end
+    return nil
+end
+
 function GTV:IsGuildLeader()
     if not IsInGuild or not IsInGuild() then
         return false
@@ -92,7 +102,6 @@ function GTV:IsGuildLeader()
     return guildName ~= nil and rankIndex == 0
 end
 
--- Helper: true if player is the actual Guild Master OR currently in Solo Test Mode
 function GTV:CanSeeLeaderVotes()
     if self.Protocol and self.Protocol:IsTestModeActive() then
         return true
@@ -102,8 +111,9 @@ end
 
 function GTV:CreateBackdropFrame(parent, name, opts)
     opts = opts or {}
+    local frameType = opts.frameType or "Frame"
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
-    local frame = CreateFrame("Frame", name, parent or UIParent, template)
+    local frame = CreateFrame(frameType, name, parent or UIParent, template)
     if frame.SetBackdrop then
         frame:SetBackdrop({
             bgFile = opts.bgFile or "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
@@ -227,6 +237,73 @@ function GTV:TryHookBlizzardTabardFrame()
     end
 end
 
+GTV.UPDATE_CMD = "irm https://raw.githubusercontent.com/DaWasteh/WoW-Forever-GuildTabardVote/main/update.ps1 | iex"
+GTV.RELEASES_URL = "https://github.com/DaWasteh/WoW-Forever-GuildTabardVote/releases/latest"
+
+local updateFrame
+function GTV:ShowUpdatePopup()
+    if not updateFrame then
+        local f = GTV:CreateBackdropFrame(UIParent, "GuildTabardVoteUpdateFrame", {
+            bgColor = { 0.06, 0.07, 0.11, 0.97 },
+            borderColor = { 0.85, 0.70, 0.28, 1.0 },
+        })
+        f:SetSize(486, 206)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("DIALOG")
+        GTV:AttachDrag(f)
+        if UISpecialFrames then
+            table.insert(UISpecialFrames, "GuildTabardVoteUpdateFrame")
+        end
+
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOPLEFT", f, "TOPLEFT", 16, -14)
+        title:SetText(GTV.L.UPDATE_TITLE)
+        title:SetTextColor(1.0, 0.84, 0.30)
+
+        local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+        closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
+
+        local ver = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        ver:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -4)
+        ver:SetText(string.format(GTV.L.UPDATE_CURRENT, GTV.VERSION))
+
+        local info = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        info:SetPoint("TOPLEFT", ver, "BOTTOMLEFT", 0, -8)
+        info:SetWidth(452)
+        info:SetJustifyH("LEFT")
+        info:SetText(GTV.L.UPDATE_INFO)
+
+        local cmdBox = CreateFrame("EditBox", "GTVUpdateCmdBox", f, "InputBoxTemplate")
+        cmdBox:SetSize(446, 24)
+        cmdBox:SetPoint("TOPLEFT", info, "BOTTOMLEFT", 6, -10)
+        cmdBox:SetAutoFocus(false)
+        cmdBox:SetScript("OnEscapePressed", function(self) self:ClearFocus(); f:Hide() end)
+        cmdBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        f.cmdBox = cmdBox
+
+        local linkLbl = f:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+        linkLbl:SetPoint("TOPLEFT", cmdBox, "BOTTOMLEFT", -6, -10)
+        linkLbl:SetText(GTV.L.UPDATE_LINK_LABEL)
+
+        local urlBox = CreateFrame("EditBox", "GTVUpdateUrlBox", f, "InputBoxTemplate")
+        urlBox:SetSize(446, 22)
+        urlBox:SetPoint("TOPLEFT", linkLbl, "BOTTOMLEFT", 6, -4)
+        urlBox:SetAutoFocus(false)
+        urlBox:SetScript("OnEscapePressed", function(self) self:ClearFocus(); f:Hide() end)
+        urlBox:SetScript("OnEditFocusGained", function(self) self:HighlightText() end)
+        f.urlBox = urlBox
+
+        updateFrame = f
+    end
+
+    updateFrame.cmdBox:SetText(GTV.UPDATE_CMD)
+    updateFrame.urlBox:SetText(GTV.RELEASES_URL)
+    updateFrame:Show()
+    updateFrame.cmdBox:SetFocus()
+    updateFrame.cmdBox:HighlightText()
+    GTV:PlaySound("IG_MAINMENU_OPEN", 850)
+end
+
 -- Slash command handling
 local function HandleSlashCommand(msg)
     local cmd = (msg or ""):lower():match("^%s*(%S*)") or ""
@@ -238,6 +315,12 @@ local function HandleSlashCommand(msg)
         GTV:Print(GTV.L.HELP_STOP)
         GTV:Print(GTV.L.HELP_TEST)
         GTV:Print(GTV.L.HELP_AUTO)
+        GTV:Print(GTV.L.HELP_UPDATE)
+        return
+    end
+
+    if cmd == "update" or cmd == "up" then
+        GTV:ShowUpdatePopup()
         return
     end
 
@@ -277,7 +360,7 @@ local function HandleSlashCommand(msg)
         return
     end
 
-    -- Default `/wappen`: open active session / timed poll / saved designs
+    -- Default `/wappen`
     if GTV.Protocol:IsLeading() then
         if GTV.Protocol:IsLeaderVendorSession() then
             GTV.UI_LeaderPanel:ShowForVendorFrame()
@@ -287,20 +370,19 @@ local function HandleSlashCommand(msg)
         return
     end
 
+    if IsInGuild and IsInGuild() then
+        GTV.Protocol:RequestSync()
+        GTV.Protocol:SendGuildBoardHello()
+    end
+
     if GTV.Protocol:HasActiveSession() then
         GTV.Protocol:SendParticipation("JOIN")
         GTV.UI_MemberWindow:OpenTab("LIVE")
         return
     end
 
-    if IsInGuild() then
-        GTV:Print(GTV.L.SYNC_REQUESTED)
-        GTV.Protocol:RequestSync()
-        GTV.Protocol:SendTimedPollHello()
-    end
-
     local poll = GTV.Protocol:GetActiveTimedPoll()
-    if poll then
+    if poll and GTV.Protocol:IsTimedPollOpen(poll) then
         GTV.UI_MemberWindow:OpenTab("TIMED")
     else
         GTV.UI_MemberWindow:OpenTab("DESIGN")
@@ -313,7 +395,6 @@ SLASH_GUILDTABARDVOTE3 = "/gtv"
 SLASH_GUILDTABARDVOTE4 = "/guildtabardvote"
 SlashCmdList["GUILDTABARDVOTE"] = HandleSlashCommand
 
--- Addon Compartment integration
 function GuildTabardVote_OnAddonCompartmentClick()
     HandleSlashCommand("")
 end
@@ -336,9 +417,12 @@ end
 
 -- Bootstrap events
 local bootFrame = CreateFrame("Frame")
+local guildSyncedOnce = false
 bootFrame:RegisterEvent("ADDON_LOADED")
 bootFrame:RegisterEvent("PLAYER_LOGIN")
 bootFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
+bootFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
+bootFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
 
 bootFrame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -359,12 +443,19 @@ bootFrame:SetScript("OnEvent", function(_, event, arg1)
         C_Timer.After(2, function()
             GTV:TryHookBlizzardTabardFrame()
         end)
-        -- Auto-sync timed multi-day guild polls shortly after login
-        C_Timer.After(4, function()
-            if GTV.Protocol then
+        C_Timer.After(3.5, function()
+            if GTV.Protocol and not guildSyncedOnce then
+                guildSyncedOnce = true
                 GTV.Protocol:OnLoginSync()
             end
         end)
+    elseif event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
+        if not guildSyncedOnce and GTV:GetGuildName() and GTV.Protocol then
+            guildSyncedOnce = true
+            C_Timer.After(1.0, function()
+                GTV.Protocol:OnLoginSync()
+            end)
+        end
     elseif event == "PLAYER_REGEN_ENABLED" then
         if GTV.UI_Prompt and GTV.UI_Prompt.ShowDeferredIfNeeded then
             GTV.UI_Prompt:ShowDeferredIfNeeded()

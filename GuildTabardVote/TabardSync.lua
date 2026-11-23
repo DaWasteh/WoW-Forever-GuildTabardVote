@@ -467,28 +467,32 @@ function TabardSync:Create3DModel(parent, width, height)
         applyCamera()
     end
 
-    local function ensureUnit()
+    local function ensureUnit(forceRefresh)
         if not model:IsVisible() then
             return
         end
-        pcall(model.SetUnit, model, "player")
-        if not model.initialized then
-            pcall(model.InitializeTabardColors, model)
-            model.initialized = true
-        end
-        calibrateAndApply()
-        C_Timer.After(0.05, function()
-            if model:IsVisible() then
-                applyCamera()
+        if forceRefresh or not model.unitInitialized then
+            model.unitInitialized = true
+            pcall(model.SetUnit, model, "player")
+            if not model.initialized then
+                pcall(model.InitializeTabardColors, model)
+                model.initialized = true
             end
-        end)
+            calibrateAndApply()
+            C_Timer.After(0.05, function()
+                if model:IsVisible() then
+                    applyCamera()
+                end
+            end)
+        end
     end
 
     model.EnsureReady = ensureUnit
     model.ApplyCamera = applyCamera
 
     model:SetScript("OnShow", function()
-        ensureUnit()
+        ensureUnit(false)
+        applyCamera()
     end)
 
     model:SetScript("OnModelLoaded", function()
@@ -503,8 +507,16 @@ function TabardSync:Create3DModel(parent, width, height)
             return
         end
         if model:IsVisible() then
+            local prev = TabardSync:ReadModel(model)
             pcall(model.SetUnit, model, "player")
             applyCamera()
+            if prev then
+                C_Timer.After(0.05, function()
+                    if model:IsVisible() then
+                        TabardSync:SeekModel(model, prev, 0, 0)
+                    end
+                end)
+            end
         end
     end)
 

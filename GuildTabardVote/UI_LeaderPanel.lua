@@ -10,7 +10,7 @@ local leaderTab = "LIVE" -- "LIVE" | "TIMED" | "SAVED"
 local forceCreateTimedView = false
 local customDurationSeconds = 3 * 86400
 
-local liveSuggRows = {}
+local liveDesignRows = {}
 local timedDesignRows = {}
 local savedRows = {}
 
@@ -129,7 +129,6 @@ local function EnsurePanel()
     f:Hide()
     GTV:AttachDrag(f)
 
-    -- Header bar
     local icon = f:CreateTexture(nil, "ARTWORK")
     icon:SetSize(24, 24)
     icon:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -10)
@@ -150,7 +149,6 @@ local function EnsurePanel()
         f:Hide()
     end)
 
-    -- Periodic countdown refresh while open
     local elapsedAcc = 0
     f:SetScript("OnUpdate", function(_, elapsed)
         elapsedAcc = elapsedAcc + elapsed
@@ -162,7 +160,7 @@ local function EnsurePanel()
         end
     end)
 
-    -- Standalone Designer sub-pane (left side, hidden when docked to Blizzard TabardFrame)
+    -- Standalone Designer sub-pane (hidden when docked to Blizzard TabardFrame)
     local designerPane = GTV:CreateBackdropFrame(f, nil, {
         bgColor = { 0.04, 0.05, 0.08, 0.92 },
         borderColor = { 0.45, 0.38, 0.22, 0.82 },
@@ -199,7 +197,6 @@ local function EnsurePanel()
     rightCol:SetPoint("TOPRIGHT", f, "TOPRIGHT", -12, -40)
     f.rightCol = rightCol
 
-    -- 3 Top Tabs: Live | Zeit-Wahl | Gespeichert
     local tabLive = CreateFrame("Button", nil, rightCol, "UIPanelButtonTemplate")
     tabLive:SetSize(84, 24)
     tabLive:SetPoint("TOPLEFT", rightCol, "TOPLEFT", 0, 0)
@@ -231,7 +228,7 @@ local function EnsurePanel()
     f.tabSaved = tabSaved
 
     -- =====================================================================
-    -- PANE 1: LIVE SESSION CONTROL (ANONYMOUS GM RESULTS)
+    -- PANE 1: LIVE SESSION + UNIFIED GUILD DESIGNS (ANONYMOUS GM RESULTS)
     -- =====================================================================
     local livePane = CreateFrame("Frame", nil, rightCol)
     livePane:SetPoint("TOPLEFT", rightCol, "TOPLEFT", 0, -30)
@@ -265,20 +262,15 @@ local function EnsurePanel()
     end)
     f.reinviteBtn = reinviteBtn
 
-    -- Anonymous GM Vote Card
     local voteCard = GTV:CreateBackdropFrame(livePane, nil, {
         bgColor = { 0.09, 0.10, 0.15, 0.92 },
         borderColor = { 0.45, 0.40, 0.25, 0.85 },
     })
-    voteCard:SetSize(292, 98)
+    voteCard:SetSize(292, 96)
     voteCard:SetPoint("TOPLEFT", liveToggleBtn, "BOTTOMLEFT", 0, -8)
     voteCard:EnableMouse(true)
-    voteCard:SetScript("OnEnter", function(self)
-        ShowAnonymousVoteTooltip(self)
-    end)
-    voteCard:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
+    voteCard:SetScript("OnEnter", function(self) ShowAnonymousVoteTooltip(self) end)
+    voteCard:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
 
     local anonHint = voteCard:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     anonHint:SetPoint("TOPLEFT", voteCard, "TOPLEFT", 10, -6)
@@ -331,18 +323,15 @@ local function EnsurePanel()
     f.barDown = barDown
 
     local summaryLine = voteCard:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    summaryLine:SetPoint("BOTTOMLEFT", voteCard, "BOTTOMLEFT", 12, 9)
-    summaryLine:SetPoint("BOTTOMRIGHT", voteCard, "BOTTOMRIGHT", -12, 9)
+    summaryLine:SetPoint("BOTTOMLEFT", voteCard, "BOTTOMLEFT", 12, 8)
+    summaryLine:SetPoint("BOTTOMRIGHT", voteCard, "BOTTOMRIGHT", -12, 8)
     summaryLine:SetJustifyH("CENTER")
     f.summaryLine = summaryLine
 
-    -- Auto-reset & Reset Votes row
     local autoCheck = CreateFrame("CheckButton", nil, livePane, "UICheckButtonTemplate")
     autoCheck:SetSize(22, 22)
     autoCheck:SetPoint("TOPLEFT", voteCard, "BOTTOMLEFT", -2, -5)
-    autoCheck:SetScript("OnClick", function(self)
-        GTV.Protocol:SetAutoReset(self:GetChecked())
-    end)
+    autoCheck:SetScript("OnClick", function(self) GTV.Protocol:SetAutoReset(self:GetChecked()) end)
     autoCheck:SetScript("OnEnter", function(self)
         if GameTooltip then
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -351,9 +340,7 @@ local function EnsurePanel()
             GameTooltip:Show()
         end
     end)
-    autoCheck:SetScript("OnLeave", function()
-        if GameTooltip then GameTooltip:Hide() end
-    end)
+    autoCheck:SetScript("OnLeave", function() if GameTooltip then GameTooltip:Hide() end end)
     f.autoCheck = autoCheck
 
     local autoLabel = livePane:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
@@ -401,7 +388,7 @@ local function EnsurePanel()
     f.liveEmptyText = liveEmptyText
 
     -- =====================================================================
-    -- PANE 2: TIMED MULTI-DAY POLL MANAGER (X DAYS, ANONYMOUS GM RESULTS)
+    -- PANE 2: TIMED MULTI-DAY POLL MANAGER
     -- =====================================================================
     local timedPane = CreateFrame("Frame", nil, rightCol)
     timedPane:SetPoint("TOPLEFT", rightCol, "TOPLEFT", 0, -30)
@@ -409,13 +396,11 @@ local function EnsurePanel()
     timedPane:Hide()
     f.timedPane = timedPane
 
-    -- Sub-view 2A: Create Timed Poll Form
     local createBox = GTV:CreateBackdropFrame(timedPane, nil, {
         bgColor = { 0.08, 0.09, 0.14, 0.92 },
         borderColor = { 0.45, 0.40, 0.25, 0.85 },
     })
-    createBox:SetPoint("TOPLEFT", timedPane, "TOPLEFT", 0, 0)
-    createBox:SetPoint("BOTTOMRIGHT", timedPane, "BOTTOMRIGHT", 0, 0)
+    createBox:SetAllPoints()
     f.timedCreateBox = createBox
 
     local createHeader = createBox:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -424,21 +409,20 @@ local function EnsurePanel()
     createHeader:SetTextColor(1.0, 0.84, 0.30)
 
     local titleLbl = createBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    titleLbl:SetPoint("TOPLEFT", createHeader, "BOTTOMLEFT", 0, -14)
+    titleLbl:SetPoint("TOPLEFT", createHeader, "BOTTOMLEFT", 0, -12)
     titleLbl:SetText(GTV.L.TIMED_TITLE_LABEL)
 
     local titleEdit = CreateFrame("EditBox", "GTVTimedTitleEdit", createBox, "InputBoxTemplate")
     titleEdit:SetSize(256, 22)
-    titleEdit:SetPoint("TOPLEFT", titleLbl, "BOTTOMLEFT", 6, -6)
+    titleEdit:SetPoint("TOPLEFT", titleLbl, "BOTTOMLEFT", 6, -5)
     titleEdit:SetAutoFocus(false)
     titleEdit:SetMaxLetters(34)
     titleEdit:SetText(GTV.L.TIMED_TITLE_DEFAULT)
     titleEdit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
     titleEdit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-    f.timedTitleEdit = titleEdit
 
     local daysLbl = createBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    daysLbl:SetPoint("TOPLEFT", titleEdit, "BOTTOMLEFT", -6, -14)
+    daysLbl:SetPoint("TOPLEFT", titleEdit, "BOTTOMLEFT", -6, -12)
     daysLbl:SetText(GTV.L.TIMED_DAYS_LABEL)
 
     local daysEdit = CreateFrame("EditBox", "GTVTimedDaysEdit", createBox, "InputBoxTemplate")
@@ -455,9 +439,7 @@ local function EnsurePanel()
             customDurationSeconds = n * 86400
         end
     end)
-    f.timedDaysEdit = daysEdit
 
-    -- Quick preset buttons (1h, 1d, 3d, 7d)
     local presets = {
         { label = GTV.L.TIMED_PRESET_1H, secs = 3600, daysText = "" },
         { label = GTV.L.TIMED_PRESET_1D, secs = 86400, daysText = "1" },
@@ -476,11 +458,7 @@ local function EnsurePanel()
         b:SetText(pr.label)
         b:SetScript("OnClick", function()
             customDurationSeconds = pr.secs
-            if pr.daysText ~= "" then
-                daysEdit:SetText(pr.daysText)
-            else
-                daysEdit:SetText("")
-            end
+            daysEdit:SetText(pr.daysText)
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
         end)
         prevPreset = b
@@ -488,9 +466,8 @@ local function EnsurePanel()
 
     local includeCurCheck = CreateFrame("CheckButton", nil, createBox, "UICheckButtonTemplate")
     includeCurCheck:SetSize(22, 22)
-    includeCurCheck:SetPoint("TOPLEFT", daysLbl, "BOTTOMLEFT", -2, -44)
+    includeCurCheck:SetPoint("TOPLEFT", daysLbl, "BOTTOMLEFT", -2, -40)
     includeCurCheck:SetChecked(true)
-    f.includeCurCheck = includeCurCheck
 
     local includeCurLbl = createBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     includeCurLbl:SetPoint("LEFT", includeCurCheck, "RIGHT", 4, 0)
@@ -498,15 +475,26 @@ local function EnsurePanel()
     includeCurLbl:SetJustifyH("LEFT")
     includeCurLbl:SetText(GTV.L.TIMED_INCLUDE_CUR)
 
+    local keepExistingCheck = CreateFrame("CheckButton", nil, createBox, "UICheckButtonTemplate")
+    keepExistingCheck:SetSize(22, 22)
+    keepExistingCheck:SetPoint("TOPLEFT", includeCurCheck, "BOTTOMLEFT", 0, -4)
+    keepExistingCheck:SetChecked(true)
+
+    local keepExistingLbl = createBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    keepExistingLbl:SetPoint("LEFT", keepExistingCheck, "RIGHT", 4, 0)
+    keepExistingLbl:SetWidth(240)
+    keepExistingLbl:SetJustifyH("LEFT")
+    keepExistingLbl:SetText(GTV.L.TIMED_KEEP_EXISTING)
+
     local anonInfo = createBox:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    anonInfo:SetPoint("TOPLEFT", includeCurCheck, "BOTTOMLEFT", 2, -16)
+    anonInfo:SetPoint("TOPLEFT", keepExistingCheck, "BOTTOMLEFT", 2, -12)
     anonInfo:SetWidth(266)
     anonInfo:SetJustifyH("LEFT")
     anonInfo:SetText(GTV.L.VOTE_ANON_NOTICE)
 
     local startTimedBtn = CreateFrame("Button", nil, createBox, "UIPanelButtonTemplate")
     startTimedBtn:SetSize(200, 30)
-    startTimedBtn:SetPoint("BOTTOM", createBox, "BOTTOM", 0, 20)
+    startTimedBtn:SetPoint("BOTTOM", createBox, "BOTTOM", 0, 18)
     startTimedBtn:SetText(GTV.L.TIMED_START_BTN)
     if startTimedBtn.GetFontString and startTimedBtn:GetFontString() then
         startTimedBtn:GetFontString():SetTextColor(0.35, 1.0, 0.45)
@@ -515,7 +503,7 @@ local function EnsurePanel()
         local initDesign = includeCurCheck:GetChecked() and ReadLeaderCurrentDesign() or nil
         local daysNum = tonumber(daysEdit:GetText())
         local secs = (daysNum and daysNum > 0) and (daysNum * 86400) or customDurationSeconds
-        local poll = GTV.Protocol:CreateTimedPoll(titleEdit:GetText(), secs, initDesign)
+        local poll = GTV.Protocol:CreateTimedPoll(titleEdit:GetText(), secs, initDesign, keepExistingCheck:GetChecked())
         if poll then
             forceCreateTimedView = false
             GTV:PlaySound("IG_QUEST_LIST_OPEN", 844)
@@ -523,7 +511,7 @@ local function EnsurePanel()
         end
     end)
 
-    -- Sub-view 2B: Active/Finished Timed Poll Dashboard (GM Anonymous Results!)
+    -- Active/Finished Timed Poll Dashboard
     local activeBox = CreateFrame("Frame", nil, timedPane)
     activeBox:SetAllPoints()
     activeBox:Hide()
@@ -556,7 +544,6 @@ local function EnsurePanel()
     pollAnonLabel:SetPoint("BOTTOMLEFT", pollInfoCard, "BOTTOMLEFT", 10, 8)
     pollAnonLabel:SetText(GTV.L.VOTE_GM_ANON_HINT)
 
-    -- Action buttons row
     local addCurBtn = CreateFrame("Button", nil, activeBox, "UIPanelButtonTemplate")
     addCurBtn:SetSize(102, 22)
     addCurBtn:SetPoint("TOPLEFT", pollInfoCard, "BOTTOMLEFT", 0, -6)
@@ -564,7 +551,7 @@ local function EnsurePanel()
     addCurBtn:SetScript("OnClick", function()
         local d = ReadLeaderCurrentDesign()
         if d then
-            GTV.Protocol:SubmitTimedPollDesign(d, "", true)
+            GTV.Protocol:SubmitGuildDesign(d, "", true)
             GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
             UI_LeaderPanel:Refresh()
         end
@@ -619,7 +606,7 @@ local function EnsurePanel()
     f.timedEmptyText = timedEmptyText
 
     -- =====================================================================
-    -- PANE 3: SAVED DESIGNS LIBRARY (SAVE & LOAD ANYTIME!)
+    -- PANE 3: SAVED DESIGNS LIBRARY
     -- =====================================================================
     local savedPane = CreateFrame("Frame", nil, rightCol)
     savedPane:SetPoint("TOPLEFT", rightCol, "TOPLEFT", 0, -30)
@@ -688,93 +675,102 @@ local function EnsurePanel()
     return f
 end
 
-local function RefreshLiveSuggestions()
-    local s = GTV.Protocol:GetSession()
-    local list = (s and s.suggestions) or {}
-    panel.liveSuggHeader:SetText(string.format(GTV.L.TAB_SUGGESTIONS, #list))
-
-    for _, row in ipairs(liveSuggRows) do
+local function RenderGuildDesignList(scrollChild, emptyText, rowPool, poll, isOpen)
+    local designs = GTV.Protocol:GetGuildDesigns()
+    for _, row in ipairs(rowPool) do
         row:Hide()
     end
-    if #list == 0 then
-        panel.liveEmptyText:Show()
-        panel.liveScrollChild:SetHeight(80)
+    if #designs == 0 then
+        emptyText:Show()
+        scrollChild:SetHeight(80)
         return
     end
-    panel.liveEmptyText:Hide()
+    emptyText:Hide()
 
-    local ordered = {}
-    for idx, entry in ipairs(list) do
-        local up, down = GTV.Protocol:GetLiveSuggestionCounts(entry)
-        table.insert(ordered, { entry = entry, idx = idx, up = up, down = down, score = up - down })
+    local ranked = {}
+    for idx, entry in ipairs(designs) do
+        local up, down = GTV.Protocol:GetDesignVotes(entry.id)
+        table.insert(ranked, { entry = entry, idx = idx, up = up, down = down, score = up - down })
     end
-    table.sort(ordered, function(a, b)
+    table.sort(ranked, function(a, b)
         if a.score ~= b.score then return a.score > b.score end
-        return a.idx > b.idx
+        if a.up ~= b.up then return a.up > b.up end
+        return a.idx < b.idx
     end)
 
     local y = -4
-    for i, item in ipairs(ordered) do
-        local sugg = item.entry
-        local row = liveSuggRows[i]
+    for i, item in ipairs(ranked) do
+        local d = item.entry
+        local row = rowPool[i]
         if not row then
-            row = GTV:CreateBackdropFrame(panel.liveScrollChild, nil, {
+            row = GTV:CreateBackdropFrame(scrollChild, nil, {
                 bgColor = { 0.10, 0.11, 0.17, 0.92 },
                 borderColor = { 0.42, 0.36, 0.22, 0.8 },
                 edgeSize = 10,
             })
-            row:SetSize(248, 66)
+            row:SetSize(248, 68)
 
             row.thumb = GTV.TabardSync:Create2DPreview(row, 42, 52)
             row.thumb:SetPoint("LEFT", row, "LEFT", 6, 0)
 
-            row.authorText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.authorText:SetPoint("TOPLEFT", row.thumb, "TOPRIGHT", 8, -2)
-            row.authorText:SetWidth(120)
-            row.authorText:SetJustifyH("LEFT")
+            row.titleText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.titleText:SetPoint("TOPLEFT", row.thumb, "TOPRIGHT", 8, -1)
+            row.titleText:SetWidth(122)
+            row.titleText:SetJustifyH("LEFT")
 
-            row.votesText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.votesText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -8)
+            row.votesText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            row.votesText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -7)
 
             row.noteText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.noteText:SetPoint("TOPLEFT", row.authorText, "BOTTOMLEFT", 0, -2)
+            row.noteText:SetPoint("TOPLEFT", row.titleText, "BOTTOMLEFT", 0, -2)
             row.noteText:SetWidth(182)
             row.noteText:SetJustifyH("LEFT")
-            row.noteText:SetTextColor(0.82, 0.84, 0.90)
+            row.noteText:SetTextColor(0.82, 0.85, 0.92)
 
             row.applyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-            row.applyBtn:SetSize(96, 20)
+            row.applyBtn:SetSize(84, 20)
             row.applyBtn:SetPoint("BOTTOMLEFT", row.thumb, "BOTTOMRIGHT", 8, 1)
             row.applyBtn:SetText(GTV.L.BTN_APPLY)
 
             row.saveBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-            row.saveBtn:SetSize(74, 20)
-            row.saveBtn:SetPoint("LEFT", row.applyBtn, "RIGHT", 6, 0)
+            row.saveBtn:SetSize(64, 20)
+            row.saveBtn:SetPoint("LEFT", row.applyBtn, "RIGHT", 4, 0)
             row.saveBtn:SetText(GTV.L.BTN_SAVE)
 
-            liveSuggRows[i] = row
+            row.delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+            row.delBtn:SetSize(26, 20)
+            row.delBtn:SetPoint("LEFT", row.saveBtn, "RIGHT", 4, 0)
+            row.delBtn:SetText(GTV.L.BTN_DELETE)
+
+            rowPool[i] = row
         end
 
+        local isWinner = poll and ((poll.winnerDesignId and poll.winnerDesignId == d.id) or (not isOpen and i == 1))
         row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", panel.liveScrollChild, "TOPLEFT", 2, y)
-        row.thumb:SetDesign(sugg.design)
-        row.authorText:SetText(sugg.authorName)
-        row.noteText:SetText(sugg.note ~= "" and ("\"" .. sugg.note .. "\"") or "")
+        row:SetPoint("TOPLEFT", scrollChild, "TOPLEFT", 2, y)
+        row:SetBackdropBorderColor(isWinner and 0.95 or 0.42, isWinner and 0.78 or 0.36, 0.22, 0.95)
+        row.thumb:SetDesign(d.design)
+        row.titleText:SetText((isWinner and GTV.L.TIMED_WINNER_TAG or "") .. d.authorName)
+        row.noteText:SetText(d.note ~= "" and ("\"" .. d.note .. "\"") or "")
         row.votesText:SetText(string.format(GTV.L.TIMED_GM_COUNTS, item.up, item.down))
 
         row.applyBtn:SetScript("OnClick", function()
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
-            GTV.Protocol:ApplySuggestion(sugg.id)
+            GTV.Protocol:ApplyDesignToLeaderModel(d.design)
         end)
         row.saveBtn:SetScript("OnClick", function()
-            local label = (sugg.note ~= "" and sugg.note) or sugg.authorName
-            GTV.Storage:SaveDesign(label, sugg.design)
+            local label = (d.note ~= "" and d.note) or d.authorName
+            GTV.Storage:SaveDesign(label, d.design)
             GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
         end)
+        row.delBtn:SetScript("OnClick", function()
+            GTV.Protocol:DeleteGuildDesign(d.id)
+            GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
+        end)
         row:Show()
-        y = y - 70
+        y = y - 72
     end
-    panel.liveScrollChild:SetHeight(math.max(100, -y + 8))
+    scrollChild:SetHeight(math.max(120, -y + 8))
 end
 
 local function RefreshTimedPollPane()
@@ -790,7 +786,7 @@ local function RefreshTimedPollPane()
 
     local isOpen = GTV.Protocol:IsTimedPollOpen(poll)
     local remStr, expired = GTV.Storage:FormatRemaining(poll.endsAt)
-    local dCount, voters, abstained = GTV.Protocol:GetTimedPollStats(poll)
+    local dCount, voters, abstained = GTV.Protocol:GetBoardStats()
 
     panel.pollTitleText:SetText(poll.title or GTV.L.TIMED_TITLE_DEFAULT)
     if poll.status == "CLOSED" then
@@ -810,99 +806,12 @@ local function RefreshTimedPollPane()
         panel.timedEndOrNewBtn:SetText(GTV.L.TIMED_NEW_BTN)
     end
 
-    for _, row in ipairs(timedDesignRows) do
-        row:Hide()
-    end
-
-    local designs = poll.designs or {}
-    if #designs == 0 then
-        panel.timedEmptyText:Show()
-        panel.timedScrollChild:SetHeight(80)
-        return
-    end
-    panel.timedEmptyText:Hide()
-
-    -- Sort by anonymous GM score (Up - Down), ties by Up desc
-    local ranked = {}
-    for idx, entry in ipairs(designs) do
-        local up, down = GTV.Protocol:GetTimedDesignVotes(poll, entry.id)
-        table.insert(ranked, { entry = entry, idx = idx, up = up, down = down, score = up - down })
-    end
-    table.sort(ranked, function(a, b)
-        if a.score ~= b.score then return a.score > b.score end
-        if a.up ~= b.up then return a.up > b.up end
-        return a.idx < b.idx
-    end)
-
-    local y = -4
-    for i, item in ipairs(ranked) do
-        local d = item.entry
-        local row = timedDesignRows[i]
-        if not row then
-            row = GTV:CreateBackdropFrame(panel.timedScrollChild, nil, {
-                bgColor = { 0.10, 0.11, 0.17, 0.92 },
-                borderColor = { 0.42, 0.36, 0.22, 0.8 },
-                edgeSize = 10,
-            })
-            row:SetSize(248, 68)
-
-            row.thumb = GTV.TabardSync:Create2DPreview(row, 42, 52)
-            row.thumb:SetPoint("LEFT", row, "LEFT", 6, 0)
-
-            row.titleText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-            row.titleText:SetPoint("TOPLEFT", row.thumb, "TOPRIGHT", 8, -1)
-            row.titleText:SetWidth(124)
-            row.titleText:SetJustifyH("LEFT")
-
-            row.votesText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            row.votesText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -7)
-
-            row.noteText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-            row.noteText:SetPoint("TOPLEFT", row.titleText, "BOTTOMLEFT", 0, -2)
-            row.noteText:SetWidth(182)
-            row.noteText:SetJustifyH("LEFT")
-            row.noteText:SetTextColor(0.82, 0.85, 0.92)
-
-            row.applyBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-            row.applyBtn:SetSize(96, 20)
-            row.applyBtn:SetPoint("BOTTOMLEFT", row.thumb, "BOTTOMRIGHT", 8, 1)
-            row.applyBtn:SetText(GTV.L.BTN_APPLY)
-
-            row.saveBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-            row.saveBtn:SetSize(74, 20)
-            row.saveBtn:SetPoint("LEFT", row.applyBtn, "RIGHT", 6, 0)
-            row.saveBtn:SetText(GTV.L.BTN_SAVE)
-
-            timedDesignRows[i] = row
-        end
-
-        local isWinner = (poll.winnerDesignId and poll.winnerDesignId == d.id) or (not isOpen and i == 1)
-        row:ClearAllPoints()
-        row:SetPoint("TOPLEFT", panel.timedScrollChild, "TOPLEFT", 2, y)
-        row:SetBackdropBorderColor(isWinner and 0.95 or 0.42, isWinner and 0.78 or 0.36, isWinner and 0.22 or 0.22, 0.95)
-        row.thumb:SetDesign(d.design)
-        row.titleText:SetText((isWinner and GTV.L.TIMED_WINNER_TAG or "") .. d.authorName)
-        row.noteText:SetText(d.note ~= "" and ("\"" .. d.note .. "\"") or "")
-        row.votesText:SetText(string.format(GTV.L.TIMED_GM_COUNTS, item.up, item.down))
-
-        row.applyBtn:SetScript("OnClick", function()
-            GTV:PlaySound("IG_MAINMENU_OPTION", 852)
-            GTV.Protocol:ApplyDesignToLeaderModel(d.design)
-        end)
-        row.saveBtn:SetScript("OnClick", function()
-            local label = (d.note ~= "" and d.note) or d.authorName
-            GTV.Storage:SaveDesign(label, d.design)
-            GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
-        end)
-        row:Show()
-        y = y - 72
-    end
-    panel.timedScrollChild:SetHeight(math.max(120, -y + 8))
+    RenderGuildDesignList(panel.timedScrollChild, panel.timedEmptyText, timedDesignRows, poll, isOpen)
 end
 
 local function RefreshSavedPane()
     local list = GTV.Storage:GetSavedDesigns()
-    local timedOpen = GTV.Protocol:IsTimedPollOpen()
+    local canSubmit = GTV.Protocol:IsGuildBoardOpenForChanges()
 
     for _, row in ipairs(savedRows) do
         row:Hide()
@@ -956,11 +865,7 @@ local function RefreshSavedPane()
         row.thumb:SetDesign(entry.design)
         row.nameText:SetText(entry.name)
 
-        if timedOpen then
-            row.pollBtn:Enable()
-        else
-            row.pollBtn:Disable()
-        end
+        if canSubmit then row.pollBtn:Enable() else row.pollBtn:Disable() end
 
         row.loadBtn:SetScript("OnClick", function()
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
@@ -969,7 +874,7 @@ local function RefreshSavedPane()
             end)
         end)
         row.pollBtn:SetScript("OnClick", function()
-            GTV.Protocol:SubmitTimedPollDesign(entry.design, entry.name, true)
+            GTV.Protocol:SubmitGuildDesign(entry.design, entry.name, true)
             GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
         end)
         row.delBtn:SetScript("OnClick", function()
@@ -1008,27 +913,20 @@ function UI_LeaderPanel:Refresh()
     if totalVotes > 0 then
         local upW = math.floor((up / totalVotes) * barWidth + 0.5)
         local downW = barWidth - upW
-        if upW > 0 then
-            panel.barUp:SetWidth(upW)
-            panel.barUp:Show()
-        else
-            panel.barUp:Hide()
-        end
-        if downW > 0 then
-            panel.barDown:SetWidth(downW)
-            panel.barDown:Show()
-        else
-            panel.barDown:Hide()
-        end
+        if upW > 0 then panel.barUp:SetWidth(upW); panel.barUp:Show() else panel.barUp:Hide() end
+        if downW > 0 then panel.barDown:SetWidth(downW); panel.barDown:Show() else panel.barDown:Hide() end
     else
         panel.barUp:Hide()
         panel.barDown:Hide()
     end
 
+    local designs = GTV.Protocol:GetGuildDesigns()
+    panel.liveSuggHeader:SetText(string.format(GTV.L.TAB_SUGGESTIONS, #designs))
+    RenderGuildDesignList(panel.liveScrollChild, panel.liveEmptyText, liveDesignRows, nil, true)
+
     local savedCount = #GTV.Storage:GetSavedDesigns()
     panel.tabSaved:SetText(GTV.L.LEADER_TAB_SAVED .. " (" .. savedCount .. ")")
 
-    RefreshLiveSuggestions()
     RefreshTimedPollPane()
     RefreshSavedPane()
 end
@@ -1062,9 +960,7 @@ function UI_LeaderPanel:ShowStandalone(isTestMode)
     f:Show()
 
     C_Timer.After(0.05, function()
-        if not f:IsShown() then
-            return
-        end
+        if not f:IsShown() then return end
         f.standaloneModel:EnsureReady()
         if not GTV.Protocol:IsLeading() or isTestMode then
             GTV.Protocol:StartLeaderSession(f.standaloneModel, true, isTestMode and true or false)

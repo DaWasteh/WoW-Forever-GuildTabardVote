@@ -4,14 +4,32 @@ local UI_MemberWindow = {}
 GTV.UI_MemberWindow = UI_MemberWindow
 
 local win
-local activeTab = "LIVE" -- "LIVE" | "TIMED" | "DESIGN" | "SAVED"
-local previewingLabel = nil
+local activeTab = "DESIGN" -- "LIVE" | "TIMED" | "DESIGN" | "SAVED"
+local selectedDesignId = nil
 local rightRowPool = {}
-local voteResetFlashTimer = nil
+local toastTimer = nil
+
+local function ShowToast(msg, r, g, b)
+    if not win or not win.toastText then
+        return
+    end
+    win.toastText:SetText(msg or "")
+    win.toastText:SetTextColor(r or 0.35, g or 1.0, b or 0.50)
+    win.toastBar:Show()
+    if toastTimer and toastTimer.Cancel then
+        toastTimer:Cancel()
+    end
+    toastTimer = C_Timer.NewTimer and C_Timer.NewTimer(3.5, function()
+        toastTimer = nil
+        if win and win.toastBar then
+            win.toastBar:Hide()
+        end
+    end) or nil
+end
 
 local function CreateCustomRow(parent, yOffset, varIndex, labelText, onStep)
     local row = CreateFrame("Frame", nil, parent)
-    row:SetSize(204, 24)
+    row:SetSize(208, 24)
     row:SetPoint("TOPLEFT", parent, "TOPLEFT", 12, yOffset)
 
     local bg = row:CreateTexture(nil, "BACKGROUND")
@@ -63,13 +81,19 @@ local function StyleTabButton(btn, selected)
     end
 end
 
+local function ColorBtnText(btn, r, g, b)
+    if btn.GetFontString and btn:GetFontString() then
+        btn:GetFontString():SetTextColor(r, g, b)
+    end
+end
+
 local function SyncModelAnd2D(targetDesign, hintVar, hintDelta)
     if not win or not win:IsShown() then
         return
     end
     win.preview2D:SetDesign(targetDesign)
     if targetDesign then
-        win.model:EnsureReady()
+        win.model:EnsureReady(false)
         win.syncHint:Show()
         GTV.TabardSync:SeekModel(win.model, targetDesign, hintVar, hintDelta, function()
             if win and win.syncHint then
@@ -89,9 +113,38 @@ local function UpdateEditor2DFromModel()
     end
 end
 
+local function GetSelectedGuildDesign()
+    if not selectedDesignId then
+        return nil
+    end
+    local board = GTV.Protocol:GetGuildBoard(false)
+    if board and board.designById then
+        return board.designById[selectedDesignId]
+    end
+    return nil
+end
+
+local function SelectGuildDesign(entry)
+    if not entry then
+        selectedDesignId = nil
+        if win and win.previewBanner then
+            win.previewBanner:Hide()
+        end
+        return
+    end
+    selectedDesignId = entry.id
+    if win then
+        local label = (entry.note and entry.note ~= "") and entry.note or entry.authorName
+        win.previewBannerText:SetText(string.format(GTV.L.STATUS_PREVIEWING_SUGG, label))
+        win.previewBanner:Show()
+        win.returnLiveBtn:SetShown(GTV.Protocol:HasActiveSession())
+        SyncModelAnd2D(entry.design, 0, 0)
+        UI_MemberWindow:Refresh()
+    end
+end
+
 local function SetActiveTab(tabName)
     activeTab = tabName
-    previewingLabel = nil
     if not win then
         return
     end
@@ -104,26 +157,80 @@ local function SetActiveTab(tabName)
     win.liveControls:SetShown(activeTab == "LIVE")
     win.timedControls:SetShown(activeTab == "TIMED")
     win.designControls:SetShown(activeTab == "DESIGN" or activeTab == "SAVED")
-    win.previewBanner:Hide()
 
     if activeTab == "LIVE" then
         local s = GTV.Protocol:GetSession()
-        if s and s.design then
+        if s and s.design and not selectedDesignId then
+            win.previewBanner:Hide()
             SyncModelAnd2D(s.design, 0, 0)
+        elseif not s then
+            local designs = GTV.Protocol:GetGuildDesigns()
+            if not GetSelectedGuildDesign() and designs[1] then
+                SelectGuildDesign(designs[1])
+            end
         end
     elseif activeTab == "TIMED" then
-        local poll = GTV.Protocol:GetActiveTimedPoll()
-        if poll and poll.designs and poll.designs[1] then
-            SyncModelAnd2D(poll.designs[1].design, 0, 0)
+        local designs = GTV.Protocol:GetGuildDesigns()
+        if not GetSelectedGuildDesign() and designs[1] then
+            SelectGuildDesign(designs[1])
         end
     else
+        win.previewBanner:Hide()
         GTV.TabardSync:CancelSeek(win.model)
         win.syncHint:Hide()
-        win.model:EnsureReady()
+        win.model:EnsureReady(false)
         C_Timer.After(0.03, UpdateEditor2DFromModel)
     end
 
     UI_MemberWindow:Refresh()
+end
+
+-- Handles big Thumbs Up / Down click (works on Live Leader design OR any selected Guild Design!)
+local function HandleBigVoteClick(vote)
+    local s = GTV.Protocol:GetSession()
+    local sel = GetSelectedGuildDesign()
+
+    if s and not sel then
+        local ok, applied = GTV.Protocol:SendVote(vote)
+        if ok then
+            GTV:PlaySound(vote == "UP" and "IG_MAINMENU_OPTION_CHECKBOX_ON" or "IG_MAINMENU_OPTION_CHECKBOX_OFF", 856)
+            if applied == "UP" then
+                ShowToast(GTV.L.TOAST_VOTED_UP, 0.35, 1.0, 0.45)
+            elseif applied == "DOWN" then
+                ShowToast(GTV.L.TOAST_VOTED_DOWN, 1.0, 0.45, 0.45)
+            else
+                ShowToast(GTV.L.TOAST_VOTE_CLEARED, 0.85, 0.85, 0.85)
+            end
+        end
+        return
+    end
+
+    if not sel then
+        local designs = GTV.Protocol:GetGuildDesigns()
+        if designs[1] then
+            SelectGuildDesign(designs[1])
+            sel = designs[1]
+        end
+    end
+
+    if sel then
+        local ok, applied = GTV.Protocol:VoteGuildDesign(sel.id, vote)
+        if ok then
+            GTV:PlaySound(vote == "UP" and "IG_MAINMENU_OPTION_CHECKBOX_ON" or "IG_MAINMENU_OPTION_CHECKBOX_OFF", 856)
+            if applied == "UP" then
+                ShowToast(GTV.L.TOAST_VOTED_UP, 0.35, 1.0, 0.45)
+            elseif applied == "DOWN" then
+                ShowToast(GTV.L.TOAST_VOTED_DOWN, 1.0, 0.45, 0.45)
+            else
+                ShowToast(GTV.L.TOAST_VOTE_CLEARED, 0.85, 0.85, 0.85)
+            end
+        else
+            ShowToast(GTV.L.TIMED_VOTING_LOCKED, 1.0, 0.65, 0.35)
+        end
+    else
+        GTV:PlaySound("IG_MAINMENU_OPTION", 852)
+        ShowToast(GTV.L.VOTE_SELECT_HINT, 1.0, 0.85, 0.35)
+    end
 end
 
 local function EnsureWindow()
@@ -135,8 +242,8 @@ local function EnsureWindow()
         bgColor = { 0.06, 0.07, 0.11, 0.96 },
         borderColor = { 0.82, 0.67, 0.28, 1.0 },
     })
-    f:SetSize(784, 522)
-    f:SetPoint("CENTER", UIParent, "CENTER", 170, 0)
+    f:SetSize(784, 526)
+    f:SetPoint("CENTER", UIParent, "CENTER", 140, 0)
     f:SetFrameStrata("HIGH")
     f:Hide()
     GTV:AttachDrag(f)
@@ -153,7 +260,6 @@ local function EnsureWindow()
         GTV.TabardSync:CancelSeek(f.model)
     end)
 
-    -- Periodic countdown refresh while open
     local acc = 0
     f:SetScript("OnUpdate", function(_, elapsed)
         acc = acc + elapsed
@@ -182,6 +288,21 @@ local function EnsureWindow()
 
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
+
+    -- Guild Master quick shortcut button to Leader Panel
+    local leaderPanelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    leaderPanelBtn:SetSize(108, 22)
+    leaderPanelBtn:SetPoint("RIGHT", closeBtn, "LEFT", -6, 0)
+    leaderPanelBtn:SetText(GTV.L.BTN_LEADER_PANEL)
+    ColorBtnText(leaderPanelBtn, 1.0, 0.88, 0.35)
+    leaderPanelBtn:SetScript("OnClick", function()
+        GTV:PlaySound("IG_MAINMENU_OPTION", 852)
+        if GTV.UI_LeaderPanel then
+            GTV.UI_LeaderPanel:ShowStandalone(GTV.Protocol:IsTestModeActive())
+        end
+    end)
+    leaderPanelBtn:Hide()
+    f.leaderPanelBtn = leaderPanelBtn
 
     -- 4 Top Mode Tabs
     local tabLiveBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
@@ -223,6 +344,22 @@ local function EnsureWindow()
         SetActiveTab("SAVED")
     end)
     f.tabSavedBtn = tabSavedBtn
+
+    -- Inline Toast Feedback Bar (top right above right panel, unmistakable instant feedback!)
+    local toastBar = GTV:CreateBackdropFrame(f, nil, {
+        bgColor = { 0.08, 0.14, 0.10, 0.96 },
+        borderColor = { 0.35, 0.85, 0.45, 0.95 },
+        edgeSize = 10,
+    })
+    toastBar:SetSize(454, 24)
+    toastBar:SetPoint("TOP", f, "TOP", -150, -82)
+    toastBar:SetFrameLevel(f:GetFrameLevel() + 20)
+    toastBar:Hide()
+    f.toastBar = toastBar
+
+    local toastText = toastBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    toastText:SetPoint("CENTER", toastBar, "CENTER", 0, 0)
+    f.toastText = toastText
 
     -- LEFT STAGE: 3D TabardModel + 2D Flat Preview
     local stage = GTV:CreateBackdropFrame(f, nil, {
@@ -286,7 +423,7 @@ local function EnsureWindow()
     returnLiveBtn:SetPoint("BOTTOM", previewBanner, "BOTTOM", 0, 8)
     returnLiveBtn:SetText(GTV.L.BTN_RETURN_LIVE)
     returnLiveBtn:SetScript("OnClick", function()
-        previewingLabel = nil
+        selectedDesignId = nil
         previewBanner:Hide()
         local s = GTV.Protocol:GetSession()
         if s and s.design then
@@ -294,26 +431,28 @@ local function EnsureWindow()
         end
         UI_MemberWindow:Refresh()
     end)
+    f.returnLiveBtn = returnLiveBtn
 
     -- =====================================================================
-    -- BOTTOM-LEFT A: LIVE ANONYMOUS VOTING (NO OTHER PLAYERS' COUNTS SHOWN!)
+    -- BOTTOM-LEFT A: ANONYMOUS VOTING BUTTONS (REAL BUTTON WIDGETS!)
     -- =====================================================================
     local liveControls = GTV:CreateBackdropFrame(f, nil, {
         bgColor = { 0.08, 0.09, 0.14, 0.92 },
         borderColor = { 0.45, 0.38, 0.22, 0.85 },
     })
-    liveControls:SetSize(454, 128)
+    liveControls:SetSize(454, 130)
     liveControls:SetPoint("TOPLEFT", stage, "BOTTOMLEFT", 0, -8)
     f.liveControls = liveControls
 
     local upBtn = GTV:CreateBackdropFrame(liveControls, nil, {
+        frameType = "Button",
         bgColor = { 0.08, 0.28, 0.13, 0.92 },
         borderColor = { 0.24, 0.80, 0.38, 0.9 },
         edgeSize = 12,
     })
     upBtn:SetSize(202, 46)
     upBtn:SetPoint("TOPLEFT", liveControls, "TOPLEFT", 14, -14)
-    upBtn:EnableMouse(true)
+    upBtn:RegisterForClicks("LeftButtonUp")
 
     local upBtnIcon = upBtn:CreateTexture(nil, "ARTWORK")
     upBtnIcon:SetSize(30, 30)
@@ -325,27 +464,20 @@ local function EnsureWindow()
     upBtnText:SetText(GTV.L.VOTE_UP)
     upBtnText:SetTextColor(0.45, 1.0, 0.55)
 
-    upBtn:SetScript("OnMouseDown", function()
-        if not GTV.Protocol:HasActiveSession() then return end
-        if voteResetFlashTimer and voteResetFlashTimer.Cancel then
-            voteResetFlashTimer:Cancel()
-            voteResetFlashTimer = nil
-        end
-        GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_ON", 856)
-        GTV.Protocol:SendVote("UP")
-    end)
+    upBtn:SetScript("OnClick", function() HandleBigVoteClick("UP") end)
     upBtn:SetScript("OnEnter", function(self) self:SetBackdropBorderColor(0.45, 1.0, 0.58, 1.0) end)
     upBtn:SetScript("OnLeave", function() UI_MemberWindow:RefreshLiveVoteButtons() end)
     f.upBtn = upBtn
 
     local downBtn = GTV:CreateBackdropFrame(liveControls, nil, {
+        frameType = "Button",
         bgColor = { 0.30, 0.09, 0.09, 0.92 },
         borderColor = { 0.85, 0.25, 0.25, 0.9 },
         edgeSize = 12,
     })
     downBtn:SetSize(202, 46)
     downBtn:SetPoint("TOPRIGHT", liveControls, "TOPRIGHT", -14, -14)
-    downBtn:EnableMouse(true)
+    downBtn:RegisterForClicks("LeftButtonUp")
 
     local downBtnIcon = downBtn:CreateTexture(nil, "ARTWORK")
     downBtnIcon:SetSize(30, 30)
@@ -357,15 +489,7 @@ local function EnsureWindow()
     downBtnText:SetText(GTV.L.VOTE_DOWN)
     downBtnText:SetTextColor(1.0, 0.48, 0.48)
 
-    downBtn:SetScript("OnMouseDown", function()
-        if not GTV.Protocol:HasActiveSession() then return end
-        if voteResetFlashTimer and voteResetFlashTimer.Cancel then
-            voteResetFlashTimer:Cancel()
-            voteResetFlashTimer = nil
-        end
-        GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
-        GTV.Protocol:SendVote("DOWN")
-    end)
+    downBtn:SetScript("OnClick", function() HandleBigVoteClick("DOWN") end)
     downBtn:SetScript("OnEnter", function(self) self:SetBackdropBorderColor(1.0, 0.45, 0.45, 1.0) end)
     downBtn:SetScript("OnLeave", function() UI_MemberWindow:RefreshLiveVoteButtons() end)
     f.downBtn = downBtn
@@ -389,7 +513,7 @@ local function EnsureWindow()
         bgColor = { 0.08, 0.09, 0.14, 0.92 },
         borderColor = { 0.45, 0.38, 0.22, 0.85 },
     })
-    timedControls:SetSize(454, 128)
+    timedControls:SetSize(454, 130)
     timedControls:SetPoint("TOPLEFT", stage, "BOTTOMLEFT", 0, -8)
     timedControls:Hide()
     f.timedControls = timedControls
@@ -419,9 +543,7 @@ local function EnsureWindow()
     timedSubmitMineBtn:SetSize(206, 26)
     timedSubmitMineBtn:SetPoint("BOTTOMLEFT", timedControls, "BOTTOMLEFT", 14, 12)
     timedSubmitMineBtn:SetText(GTV.L.TIMED_ADD_DESIGN_BTN)
-    if timedSubmitMineBtn.GetFontString and timedSubmitMineBtn:GetFontString() then
-        timedSubmitMineBtn:GetFontString():SetTextColor(1.0, 0.88, 0.35)
-    end
+    ColorBtnText(timedSubmitMineBtn, 1.0, 0.88, 0.35)
     timedSubmitMineBtn:SetScript("OnClick", function()
         GTV:PlaySound("IG_CHARACTER_INFO_TAB", 841)
         SetActiveTab("DESIGN")
@@ -433,11 +555,18 @@ local function EnsureWindow()
     timedAbstainBtn:SetPoint("BOTTOMRIGHT", timedControls, "BOTTOMRIGHT", -14, 12)
     timedAbstainBtn:SetText(GTV.L.VOTE_ABSTAIN_BTN)
     timedAbstainBtn:SetScript("OnClick", function()
-        local poll = GTV.Protocol:GetActiveTimedPoll()
-        if not poll then return end
-        local myBallot = GTV.Storage:GetMyBallot(poll.id)
-        GTV.Protocol:SetTimedPollAbstain(not myBallot.abstained)
-        GTV:PlaySound("IG_MAINMENU_OPTION", 852)
+        local board = GTV.Protocol:GetGuildBoard(true)
+        if not board then
+            ShowToast(GTV.L.SUGG_NEED_GUILD, 1.0, 0.65, 0.35)
+            return
+        end
+        local scopeId = GTV.Storage:GetBoardScopeId(board)
+        local myBallot = GTV.Storage:GetMyBallot(scopeId)
+        local newVal = not myBallot.abstained
+        if GTV.Protocol:SetTimedPollAbstain(newVal) then
+            GTV:PlaySound("IG_MAINMENU_OPTION", 852)
+            ShowToast(newVal and GTV.L.TOAST_ABSTAINED or GTV.L.TOAST_UNABSTAINED, 0.85, 0.85, 0.95)
+        end
     end)
     f.timedAbstainBtn = timedAbstainBtn
 
@@ -448,13 +577,13 @@ local function EnsureWindow()
         bgColor = { 0.08, 0.09, 0.14, 0.92 },
         borderColor = { 0.45, 0.38, 0.22, 0.85 },
     })
-    designControls:SetSize(454, 128)
+    designControls:SetSize(454, 130)
     designControls:SetPoint("TOPLEFT", stage, "BOTTOMLEFT", 0, -8)
     designControls:Hide()
     f.designControls = designControls
 
     local function onDesignStep(varIndex, delta)
-        f.model:EnsureReady()
+        f.model:EnsureReady(false)
         f.model:CycleVariation(varIndex, delta)
         UpdateEditor2DFromModel()
     end
@@ -480,9 +609,11 @@ local function EnsureWindow()
     copyBtn:SetText(GTV.L.BTN_COPY_LEADER)
     copyBtn:SetScript("OnClick", function()
         local s = GTV.Protocol:GetSession()
-        if s and s.design then
+        local sel = GetSelectedGuildDesign()
+        local target = (s and s.design) or (sel and sel.design)
+        if target then
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
-            SyncModelAnd2D(s.design, 0, 0)
+            SyncModelAnd2D(target, 0, 0)
         end
     end)
 
@@ -492,7 +623,7 @@ local function EnsureWindow()
     randBtn:SetText(GTV.L.BTN_RANDOM)
     randBtn:SetScript("OnClick", function()
         GTV:PlaySound("GS_CHARACTER_CREATION_LOOK", 823)
-        f.model:EnsureReady()
+        f.model:EnsureReady(false)
         for v = 1, 5 do
             local steps = math.random(1, v == 1 and 40 or 12)
             for _ = 1, steps do
@@ -502,9 +633,8 @@ local function EnsureWindow()
         UpdateEditor2DFromModel()
     end)
 
-    -- Bottom row: Name/Note input + Save Locally + Submit to Guild!
     local noteBox = CreateFrame("EditBox", "GTVNoteEditBox", designControls, "InputBoxTemplate")
-    noteBox:SetSize(202, 22)
+    noteBox:SetSize(196, 22)
     noteBox:SetPoint("BOTTOMLEFT", designControls, "BOTTOMLEFT", 14, 8)
     noteBox:SetAutoFocus(false)
     noteBox:SetMaxLetters(34)
@@ -520,58 +650,59 @@ local function EnsureWindow()
     end)
 
     local saveLocalBtn = CreateFrame("Button", nil, designControls, "UIPanelButtonTemplate")
-    saveLocalBtn:SetSize(106, 24)
+    saveLocalBtn:SetSize(108, 24)
     saveLocalBtn:SetPoint("LEFT", noteBox, "RIGHT", 8, 0)
     saveLocalBtn:SetText(GTV.L.BTN_SAVE_LOCAL)
     saveLocalBtn:SetScript("OnClick", function()
         local design = GTV.TabardSync:ReadModel(f.model)
         if not design then
             GTV:Print(GTV.L.SUGG_NO_DESIGN)
+            ShowToast(GTV.L.SUGG_NO_DESIGN, 1.0, 0.65, 0.35)
             return
         end
-        GTV.Storage:SaveDesign(noteBox:GetText(), design)
-        GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+        local saved = GTV.Storage:SaveDesign(noteBox:GetText(), design)
+        if saved then
+            GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+            ShowToast(string.format(GTV.L.SAVED_CONFIRMED, saved.name), 0.35, 1.0, 0.45)
+            noteBox:SetText("")
+            noteBox:ClearFocus()
+        end
     end)
 
     local submitBtn = CreateFrame("Button", nil, designControls, "UIPanelButtonTemplate")
-    submitBtn:SetSize(112, 24)
+    submitBtn:SetSize(116, 24)
     submitBtn:SetPoint("LEFT", saveLocalBtn, "RIGHT", 6, 0)
     submitBtn:SetText(GTV.L.BTN_SUBMIT_SUGG)
-    if submitBtn.GetFontString and submitBtn:GetFontString() then
-        submitBtn:GetFontString():SetTextColor(1.0, 0.88, 0.35)
-    end
+    ColorBtnText(submitBtn, 1.0, 0.88, 0.35)
     submitBtn:SetScript("OnClick", function()
         local design = GTV.TabardSync:ReadModel(f.model)
         if not design then
             GTV:Print(GTV.L.SUGG_NO_DESIGN)
+            ShowToast(GTV.L.SUGG_NO_DESIGN, 1.0, 0.65, 0.35)
             return
         end
-        local note = noteBox:GetText()
-        local sent = false
-        if GTV.Protocol:IsTimedPollOpen() then
-            sent = GTV.Protocol:SubmitTimedPollDesign(design, note, false) or sent
-        end
-        if GTV.Protocol:HasActiveSession() then
-            sent = GTV.Protocol:SendSuggestion(design, note) or sent
-        end
-        if sent then
+        local ok, resultOrErr = GTV.Protocol:SubmitGuildDesign(design, noteBox:GetText(), false)
+        if ok then
             GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+            ShowToast(GTV.L.SUGG_SENT, 0.35, 1.0, 0.45)
             noteBox:SetText("")
             noteBox:ClearFocus()
+            selectedDesignId = resultOrErr
+            UI_MemberWindow:Refresh()
         else
-            GTV:Print(GTV.L.STATUS_NO_SESSION)
+            ShowToast(resultOrErr or GTV.L.SUGG_NEED_GUILD, 1.0, 0.55, 0.35)
         end
     end)
     f.submitBtn = submitBtn
 
     -- =====================================================================
-    -- RIGHT COLUMN: CONTEXTUAL FEED (LIVE DESIGNS / TIMED DESIGNS / SAVED)
+    -- RIGHT COLUMN: UNIFIED GUILD DESIGNS BOARD / SAVED DESIGNS
     -- =====================================================================
     local rightPanel = GTV:CreateBackdropFrame(f, nil, {
         bgColor = { 0.05, 0.06, 0.09, 0.92 },
         borderColor = { 0.45, 0.38, 0.22, 0.85 },
     })
-    rightPanel:SetSize(294, 430)
+    rightPanel:SetSize(294, 432)
     rightPanel:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -80)
 
     local rightTitle = rightPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -595,9 +726,9 @@ local function EnsureWindow()
     f.emptyRight = emptyRight
 
     win = f
-    StyleTabButton(tabLiveBtn, true)
+    StyleTabButton(tabLiveBtn, false)
     StyleTabButton(tabTimedBtn, false)
-    StyleTabButton(tabDesignBtn, false)
+    StyleTabButton(tabDesignBtn, true)
     StyleTabButton(tabSavedBtn, false)
     return f
 end
@@ -607,7 +738,21 @@ function UI_MemberWindow:RefreshLiveVoteButtons()
         return
     end
     local s = GTV.Protocol:GetSession()
-    local myVote = s and s.myVote or nil
+    local sel = GetSelectedGuildDesign()
+    local myVote = nil
+
+    if s and not sel then
+        myVote = s.myVote
+    elseif sel then
+        local board = GTV.Protocol:GetGuildBoard(false)
+        if board then
+            local scopeId = GTV.Storage:GetBoardScopeId(board)
+            local myBallot = GTV.Storage:GetMyBallot(scopeId)
+            if not myBallot.abstained then
+                myVote = myBallot.votes[sel.id]
+            end
+        end
+    end
 
     if myVote == "UP" then
         win.upBtn:SetBackdropColor(0.14, 0.48, 0.22, 1.0)
@@ -626,8 +771,10 @@ function UI_MemberWindow:RefreshLiveVoteButtons()
         win.upBtn:SetBackdropBorderColor(0.24, 0.80, 0.38, 0.9)
         win.downBtn:SetBackdropColor(0.30, 0.09, 0.09, 0.92)
         win.downBtn:SetBackdropBorderColor(0.85, 0.25, 0.25, 0.9)
-        if not voteResetFlashTimer then
+        if s or sel then
             win.yourVoteText:SetText(GTV.L.VOTE_YOUR_NONE)
+        else
+            win.yourVoteText:SetText(GTV.L.VOTE_SELECT_HINT)
         end
     end
 end
@@ -661,31 +808,30 @@ local function AcquireRightRow(index)
     row.note:SetJustifyH("LEFT")
     row.note:SetTextColor(0.82, 0.85, 0.92)
 
-    -- 4 compact action buttons along bottom of row
     row.btn1 = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    row.btn1:SetSize(56, 20)
+    row.btn1:SetSize(52, 20)
     row.btn1:SetPoint("BOTTOMLEFT", row.thumb, "BOTTOMRIGHT", 8, 2)
 
     row.btn2 = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    row.btn2:SetSize(44, 20)
+    row.btn2:SetSize(42, 20)
     row.btn2:SetPoint("LEFT", row.btn1, "RIGHT", 3, 0)
 
     row.btn3 = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    row.btn3:SetSize(46, 20)
+    row.btn3:SetSize(44, 20)
     row.btn3:SetPoint("LEFT", row.btn2, "RIGHT", 3, 0)
 
     row.btn4 = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-    row.btn4:SetSize(38, 20)
+    row.btn4:SetSize(44, 20)
     row.btn4:SetPoint("LEFT", row.btn3, "RIGHT", 3, 0)
+
+    row.delBtn = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+    row.delBtn:SetSize(20, 18)
+    row.delBtn:SetPoint("TOPRIGHT", row, "TOPRIGHT", -4, -4)
+    row.delBtn:SetText(GTV.L.BTN_DELETE)
+    ColorBtnText(row.delBtn, 1.0, 0.45, 0.45)
 
     rightRowPool[index] = row
     return row
-end
-
-local function ColorBtnText(btn, r, g, b)
-    if btn.GetFontString and btn:GetFontString() then
-        btn:GetFontString():SetTextColor(r, g, b)
-    end
 end
 
 local function RefreshRightList()
@@ -696,7 +842,7 @@ local function RefreshRightList()
         row:Hide()
     end
 
-    -- Mode 1: SAVED DESIGNS tab
+    -- SAVED DESIGNS TAB
     if activeTab == "SAVED" then
         local saved = GTV.Storage:GetSavedDesigns()
         win.rightTitle:SetText(string.format(GTV.L.TAB_SAVED, #saved))
@@ -707,7 +853,6 @@ local function RefreshRightList()
             return
         end
         win.emptyRight:Hide()
-        local canSubmit = GTV.Protocol:HasActiveSession() or GTV.Protocol:IsTimedPollOpen()
         local y = -4
         for i, entry in ipairs(saved) do
             local row = AcquireRightRow(i)
@@ -718,8 +863,9 @@ local function RefreshRightList()
             row.header:SetText(entry.name)
             row.gmBadge:SetText("")
             row.note:SetText("")
+            row.delBtn:Hide()
 
-            row.btn1:SetSize(64, 20)
+            row.btn1:SetSize(60, 20)
             row.btn1:SetText(GTV.L.BTN_LOAD)
             ColorBtnText(row.btn1, 0.95, 0.95, 0.95)
             row.btn1:Show()
@@ -727,24 +873,21 @@ local function RefreshRightList()
             row.btn1:SetScript("OnClick", function()
                 GTV:PlaySound("IG_MAINMENU_OPTION", 852)
                 SyncModelAnd2D(entry.design, 0, 0)
-                GTV:Print(string.format(GTV.L.SAVED_LOADED, entry.name))
+                ShowToast(string.format(GTV.L.SAVED_LOADED, entry.name), 0.55, 0.85, 1.0)
             end)
 
-            row.btn2:SetSize(84, 20)
+            row.btn2:SetSize(88, 20)
             row.btn2:SetText(GTV.L.BTN_SUBMIT_SUGG)
             ColorBtnText(row.btn2, 1.0, 0.88, 0.35)
             row.btn2:Show()
-            if canSubmit then row.btn2:Enable() else row.btn2:Disable() end
+            row.btn2:Enable()
             row.btn2:SetScript("OnClick", function()
-                local ok = false
-                if GTV.Protocol:IsTimedPollOpen() then
-                    ok = GTV.Protocol:SubmitTimedPollDesign(entry.design, entry.name, false) or ok
-                end
-                if GTV.Protocol:HasActiveSession() then
-                    ok = GTV.Protocol:SendSuggestion(entry.design, entry.name) or ok
-                end
+                local ok, err = GTV.Protocol:SubmitGuildDesign(entry.design, entry.name, false)
                 if ok then
                     GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+                    ShowToast(GTV.L.SUGG_SENT, 0.35, 1.0, 0.45)
+                else
+                    ShowToast(err or GTV.L.SUGG_NEED_GUILD, 1.0, 0.55, 0.35)
                 end
             end)
 
@@ -756,6 +899,7 @@ local function RefreshRightList()
             row.btn3:SetScript("OnClick", function()
                 GTV.Storage:DeleteSavedDesign(entry.id)
                 GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
+                ShowToast(string.format(GTV.L.SAVED_DELETED, entry.name), 1.0, 0.65, 0.45)
             end)
 
             row.btn4:Hide()
@@ -766,104 +910,10 @@ local function RefreshRightList()
         return
     end
 
-    -- Mode 2: TIMED POLL DESIGNS (or DESIGN tab when timed poll is active)
-    local poll = GTV.Protocol:GetActiveTimedPoll()
-    if activeTab == "TIMED" or (activeTab == "DESIGN" and poll and not GTV.Protocol:HasActiveSession()) then
-        local designs = (poll and poll.designs) or {}
-        win.rightTitle:SetText(string.format(GTV.L.TAB_SUGGESTIONS, #designs))
-        if not poll then
-            win.emptyRight:SetText(GTV.L.TIMED_NONE)
-            win.emptyRight:Show()
-            win.scrollChild:SetHeight(120)
-            return
-        end
-        if #designs == 0 then
-            win.emptyRight:SetText(GTV.L.SUGG_EMPTY)
-            win.emptyRight:Show()
-            win.scrollChild:SetHeight(120)
-            return
-        end
-        win.emptyRight:Hide()
-
-        local isOpen = GTV.Protocol:IsTimedPollOpen(poll)
-        local myBallot = GTV.Storage:GetMyBallot(poll.id)
-        local isGM = (not GTV.Protocol:IsTestModeActive()) and GTV:IsGuildLeader()
-        local y = -4
-
-        for i, d in ipairs(designs) do
-            local row = AcquireRightRow(i)
-            row:ClearAllPoints()
-            row:SetPoint("TOPLEFT", win.scrollChild, "TOPLEFT", 2, y)
-
-            local isWinner = poll.winnerDesignId and poll.winnerDesignId == d.id
-            row:SetBackdropBorderColor(isWinner and 0.95 or 0.40, isWinner and 0.78 or 0.35, 0.22, 0.92)
-            row.thumb:SetDesign(d.design)
-            row.header:SetText((isWinner and GTV.L.TIMED_WINNER_TAG or "") .. d.authorName)
-            row.note:SetText(d.note ~= "" and ("\"" .. d.note .. "\"") or "")
-
-            -- PRIVACY: ONLY Guild Master sees vote counts (strictly anonymous)!
-            if isGM then
-                local up, down = GTV.Protocol:GetTimedDesignVotes(poll, d.id)
-                row.gmBadge:SetText(string.format(GTV.L.TIMED_GM_COUNTS, up, down))
-            else
-                row.gmBadge:SetText("")
-            end
-
-            local myV = (not myBallot.abstained) and myBallot.votes[d.id] or nil
-
-            row.btn1:SetSize(56, 20)
-            row.btn1:SetText(GTV.L.BTN_PREVIEW)
-            ColorBtnText(row.btn1, 0.95, 0.95, 0.95)
-            row.btn1:Show()
-            row.btn1:Enable()
-            row.btn1:SetScript("OnClick", function()
-                GTV:PlaySound("IG_MAINMENU_OPTION", 852)
-                SyncModelAnd2D(d.design, 0, 0)
-            end)
-
-            row.btn2:SetSize(44, 20)
-            row.btn2:SetText(GTV.L.VOTE_UP_SHORT)
-            ColorBtnText(row.btn2, myV == "UP" and 0.30 or 0.85, myV == "UP" and 1.0 or 0.85, myV == "UP" and 0.42 or 0.85)
-            row.btn2:Show()
-            if isOpen then row.btn2:Enable() else row.btn2:Disable() end
-            row.btn2:SetScript("OnClick", function()
-                GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_ON", 856)
-                GTV.Protocol:VoteTimedDesign(d.id, "UP")
-            end)
-
-            row.btn3:SetSize(46, 20)
-            row.btn3:SetText(GTV.L.VOTE_DOWN_SHORT)
-            ColorBtnText(row.btn3, myV == "DOWN" and 1.0 or 0.85, myV == "DOWN" and 0.35 or 0.85, myV == "DOWN" and 0.35 or 0.85)
-            row.btn3:Show()
-            if isOpen then row.btn3:Enable() else row.btn3:Disable() end
-            row.btn3:SetScript("OnClick", function()
-                GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
-                GTV.Protocol:VoteTimedDesign(d.id, "DOWN")
-            end)
-
-            row.btn4:SetSize(38, 20)
-            row.btn4:SetText(GTV.L.BTN_SAVE)
-            ColorBtnText(row.btn4, 0.85, 0.85, 0.95)
-            row.btn4:Show()
-            row.btn4:Enable()
-            row.btn4:SetScript("OnClick", function()
-                local label = (d.note ~= "" and d.note) or d.authorName
-                GTV.Storage:SaveDesign(label, d.design)
-                GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
-            end)
-
-            row:Show()
-            y = y - 86
-        end
-        win.scrollChild:SetHeight(math.max(120, -y + 8))
-        return
-    end
-
-    -- Mode 3: LIVE SESSION DESIGNS
-    local s = GTV.Protocol:GetSession()
-    local list = (s and s.suggestions) or {}
-    win.rightTitle:SetText(string.format(GTV.L.TAB_SUGGESTIONS, #list))
-    if #list == 0 then
+    -- UNIFIED GUILD DESIGNS BOARD (Visible to EVERY guild member across Live, Timed & Designer tabs!)
+    local designs = GTV.Protocol:GetGuildDesigns()
+    win.rightTitle:SetText(string.format(GTV.L.TAB_SUGGESTIONS, #designs))
+    if #designs == 0 then
         win.emptyRight:SetText(GTV.L.SUGG_EMPTY)
         win.emptyRight:Show()
         win.scrollChild:SetHeight(120)
@@ -871,71 +921,108 @@ local function RefreshRightList()
     end
     win.emptyRight:Hide()
 
-    local myHash = s and GTV.Storage:GetVoterHash(s.id) or ""
-    local isGM = (not GTV.Protocol:IsTestModeActive()) and GTV:IsGuildLeader()
-    local y = -4
+    local board = GTV.Protocol:GetGuildBoard(false)
+    local poll = board and board.timedPoll or nil
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local canVote = GTV.Protocol:IsGuildBoardOpenForChanges()
+    -- PRIVACY: ONLY the actual Guild Master sees anonymous vote counts (hidden from regular members & member view in test mode!)
+    local showGMCounts = (not GTV.Protocol:IsTestModeActive()) and GTV:IsGuildLeader()
 
-    for i, sugg in ipairs(list) do
+    local y = -4
+    for i, d in ipairs(designs) do
         local row = AcquireRightRow(i)
         row:ClearAllPoints()
         row:SetPoint("TOPLEFT", win.scrollChild, "TOPLEFT", 2, y)
-        row:SetBackdropBorderColor(0.40, 0.35, 0.22, 0.82)
-        row.thumb:SetDesign(sugg.design)
-        row.header:SetText(sugg.authorName)
-        row.note:SetText(sugg.note ~= "" and ("\"" .. sugg.note .. "\"") or "")
 
-        -- PRIVACY: ONLY Guild Master sees vote counts (strictly anonymous)!
-        if isGM then
-            local up, down = GTV.Protocol:GetLiveSuggestionCounts(sugg)
+        local isSelected = (selectedDesignId == d.id)
+        local isWinner = poll and poll.winnerDesignId and poll.winnerDesignId == d.id
+        if isWinner then
+            row:SetBackdropBorderColor(0.98, 0.82, 0.22, 1.0)
+        elseif isSelected then
+            row:SetBackdropBorderColor(0.35, 0.78, 1.0, 1.0)
+        else
+            row:SetBackdropBorderColor(0.40, 0.35, 0.22, 0.82)
+        end
+
+        row.thumb:SetDesign(d.design)
+        row.header:SetText((isWinner and GTV.L.TIMED_WINNER_TAG or "") .. d.authorName)
+        row.note:SetText(d.note ~= "" and ("\"" .. d.note .. "\"") or "")
+
+        local canDel = GTV.Protocol:CanDeleteDesign(d)
+        if showGMCounts then
+            local up, down = GTV.Protocol:GetDesignVotes(d.id)
             row.gmBadge:SetText(string.format(GTV.L.TIMED_GM_COUNTS, up, down))
+            row.gmBadge:ClearAllPoints()
+            row.gmBadge:SetPoint("TOPRIGHT", row, "TOPRIGHT", canDel and -28 or -8, -8)
         else
             row.gmBadge:SetText("")
         end
 
-        local myV = sugg.votes and sugg.votes[myHash] or nil
+        if canDel then
+            row.delBtn:Show()
+            row.delBtn:SetScript("OnClick", function()
+                if selectedDesignId == d.id then
+                    selectedDesignId = nil
+                end
+                GTV.Protocol:DeleteGuildDesign(d.id)
+                GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
+                ShowToast(GTV.L.SUGG_DELETED, 1.0, 0.65, 0.45)
+            end)
+        else
+            row.delBtn:Hide()
+        end
 
-        row.btn1:SetSize(56, 20)
+        local myV = (not myBallot.abstained) and myBallot.votes[d.id] or nil
+
+        row.btn1:SetSize(52, 20)
         row.btn1:SetText(GTV.L.BTN_PREVIEW)
-        ColorBtnText(row.btn1, 0.95, 0.95, 0.95)
+        ColorBtnText(row.btn1, isSelected and 0.45 or 0.95, isSelected and 0.88 or 0.95, 1.0)
         row.btn1:Show()
         row.btn1:Enable()
         row.btn1:SetScript("OnClick", function()
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
-            previewingLabel = sugg.authorName
-            win.previewBannerText:SetText(string.format(GTV.L.STATUS_PREVIEWING_SUGG, sugg.authorName))
-            win.previewBanner:Show()
-            SyncModelAnd2D(sugg.design, 0, 0)
+            SelectGuildDesign(d)
         end)
 
-        row.btn2:SetSize(44, 20)
+        row.btn2:SetSize(42, 20)
         row.btn2:SetText(GTV.L.VOTE_UP_SHORT)
         ColorBtnText(row.btn2, myV == "UP" and 0.30 or 0.85, myV == "UP" and 1.0 or 0.85, myV == "UP" and 0.42 or 0.85)
         row.btn2:Show()
-        row.btn2:Enable()
+        if canVote then row.btn2:Enable() else row.btn2:Disable() end
         row.btn2:SetScript("OnClick", function()
-            GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_ON", 856)
-            GTV.Protocol:VoteLiveSuggestion(sugg.id, "UP")
+            local ok, applied = GTV.Protocol:VoteGuildDesign(d.id, "UP")
+            if ok then
+                GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_ON", 856)
+                ShowToast(applied == "UP" and GTV.L.TOAST_VOTED_UP or GTV.L.TOAST_VOTE_CLEARED, 0.35, 1.0, 0.45)
+            end
         end)
 
-        row.btn3:SetSize(46, 20)
+        row.btn3:SetSize(44, 20)
         row.btn3:SetText(GTV.L.VOTE_DOWN_SHORT)
         ColorBtnText(row.btn3, myV == "DOWN" and 1.0 or 0.85, myV == "DOWN" and 0.35 or 0.85, myV == "DOWN" and 0.35 or 0.85)
         row.btn3:Show()
-        row.btn3:Enable()
+        if canVote then row.btn3:Enable() else row.btn3:Disable() end
         row.btn3:SetScript("OnClick", function()
-            GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
-            GTV.Protocol:VoteLiveSuggestion(sugg.id, "DOWN")
+            local ok, applied = GTV.Protocol:VoteGuildDesign(d.id, "DOWN")
+            if ok then
+                GTV:PlaySound("IG_MAINMENU_OPTION_CHECKBOX_OFF", 857)
+                ShowToast(applied == "DOWN" and GTV.L.TOAST_VOTED_DOWN or GTV.L.TOAST_VOTE_CLEARED, 1.0, 0.45, 0.45)
+            end
         end)
 
-        row.btn4:SetSize(38, 20)
+        row.btn4:SetSize(44, 20)
         row.btn4:SetText(GTV.L.BTN_SAVE)
-        ColorBtnText(row.btn4, 0.85, 0.85, 0.95)
+        ColorBtnText(row.btn4, 0.85, 0.88, 0.98)
         row.btn4:Show()
         row.btn4:Enable()
         row.btn4:SetScript("OnClick", function()
-            local label = (sugg.note ~= "" and sugg.note) or sugg.authorName
-            GTV.Storage:SaveDesign(label, sugg.design)
-            GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+            local label = (d.note ~= "" and d.note) or d.authorName
+            local saved = GTV.Storage:SaveDesign(label, d.design)
+            if saved then
+                GTV:PlaySound("IG_QUEST_LIST_COMPLETE", 878)
+                ShowToast(string.format(GTV.L.SAVED_CONFIRMED, saved.name), 0.35, 1.0, 0.45)
+            end
         end)
 
         row:Show()
@@ -949,12 +1036,15 @@ function UI_MemberWindow:Refresh()
         return
     end
     local s = GTV.Protocol:GetSession()
-    local poll = GTV.Protocol:GetActiveTimedPoll()
+    local board = GTV.Protocol:GetGuildBoard(false)
+    local poll = board and board.timedPoll or nil
     local timedOpen = GTV.Protocol:IsTimedPollOpen(poll)
     local savedCount = #GTV.Storage:GetSavedDesigns()
+    local guildName = GTV:GetGuildName()
 
     win.tabSavedBtn:SetText(string.format(GTV.L.TAB_SAVED, savedCount))
     win.tabTimedBtn:SetText(timedOpen and GTV.L.TAB_TIMED_ACTIVE or GTV.L.TAB_TIMED)
+    win.leaderPanelBtn:SetShown(GTV:IsGuildLeader() or GTV.Protocol:IsTestModeActive())
 
     if s and s.isTestMode then
         win.statusText:SetText(GTV.L.STATUS_TEST)
@@ -963,20 +1053,20 @@ function UI_MemberWindow:Refresh()
     elseif timedOpen then
         local rem = GTV.Storage:FormatRemaining(poll.endsAt)
         win.statusText:SetText(string.format(GTV.L.TIMED_REMAINING, rem))
+    elseif guildName then
+        win.statusText:SetText(string.format(GTV.L.STATUS_GUILD_BOARD, guildName))
     else
-        win.statusText:SetText(GTV.L.STATUS_NO_SESSION)
+        win.statusText:SetText(GTV.L.STATUS_NO_GUILD)
     end
 
-    if s or timedOpen then
-        win.submitBtn:Enable()
-    else
-        win.submitBtn:Disable()
-    end
+    -- Refresh Timed Poll bar
+    local designs = GTV.Protocol:GetGuildDesigns()
+    local scopeId = board and GTV.Storage:GetBoardScopeId(board) or "default"
+    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local boardOpen = GTV.Protocol:IsGuildBoardOpenForChanges()
 
-    -- Refresh Timed Poll controls bar
     if poll then
         local rem, expired = GTV.Storage:FormatRemaining(poll.endsAt)
-        local myBallot = GTV.Storage:GetMyBallot(poll.id)
         win.timedTitle:SetText(poll.title or GTV.L.TIMED_TITLE_DEFAULT)
         if poll.status == "CLOSED" then
             win.timedRemText:SetText(GTV.L.TIMED_CLOSED)
@@ -985,26 +1075,26 @@ function UI_MemberWindow:Refresh()
         else
             win.timedRemText:SetText(string.format(GTV.L.TIMED_REMAINING, rem))
         end
-
-        if myBallot.abstained then
-            win.timedSubText:SetText(GTV.L.VOTE_ABSTAINED_BADGE)
-            ColorBtnText(win.timedAbstainBtn, 1.0, 0.85, 0.35)
-        else
-            win.timedSubText:SetText(string.format(GTV.L.TIMED_STATS_MEMBER, #(poll.designs or {})))
-            ColorBtnText(win.timedAbstainBtn, 0.90, 0.90, 0.90)
-        end
-
-        if timedOpen then
-            win.timedSubmitMineBtn:Enable()
-            win.timedAbstainBtn:Enable()
-        else
-            win.timedSubmitMineBtn:Disable()
-            win.timedAbstainBtn:Disable()
-        end
     else
         win.timedTitle:SetText(GTV.L.TAB_TIMED)
         win.timedRemText:SetText("")
+    end
+
+    if myBallot.abstained then
+        win.timedSubText:SetText(GTV.L.VOTE_ABSTAINED_BADGE)
+        ColorBtnText(win.timedAbstainBtn, 1.0, 0.85, 0.35)
+    elseif poll then
+        win.timedSubText:SetText(string.format(GTV.L.TIMED_STATS_MEMBER, #designs))
+        ColorBtnText(win.timedAbstainBtn, 0.90, 0.90, 0.90)
+    else
         win.timedSubText:SetText(GTV.L.TIMED_NONE)
+        ColorBtnText(win.timedAbstainBtn, 0.90, 0.90, 0.90)
+    end
+
+    if boardOpen then
+        win.timedSubmitMineBtn:Enable()
+        win.timedAbstainBtn:Enable()
+    else
         win.timedSubmitMineBtn:Disable()
         win.timedAbstainBtn:Disable()
     end
@@ -1016,13 +1106,11 @@ end
 function UI_MemberWindow:OpenTab(tabName)
     local f = EnsureWindow()
     f:Show()
-    SetActiveTab(tabName or "LIVE")
+    SetActiveTab(tabName or "DESIGN")
 
     C_Timer.After(0.05, function()
-        if not f:IsShown() then
-            return
-        end
-        f.model:EnsureReady()
+        if not f:IsShown() then return end
+        f.model:EnsureReady(false)
         if activeTab == "LIVE" then
             local s = GTV.Protocol:GetSession()
             if s and s.design then
@@ -1031,9 +1119,9 @@ function UI_MemberWindow:OpenTab(tabName)
                 UpdateEditor2DFromModel()
             end
         elseif activeTab == "TIMED" then
-            local poll = GTV.Protocol:GetActiveTimedPoll()
-            if poll and poll.designs and poll.designs[1] then
-                SyncModelAnd2D(poll.designs[1].design, 0, 0)
+            local designs = GTV.Protocol:GetGuildDesigns()
+            if designs[1] then
+                SelectGuildDesign(designs[1])
             else
                 UpdateEditor2DFromModel()
             end
@@ -1058,30 +1146,20 @@ GTV.Protocol:RegisterCallback(function(eventName, arg1, arg2, arg3, arg4)
     end
     if eventName == "DESIGN_UPDATED" then
         local session, varIdx, delta, votesCleared = arg1, arg2, arg3, arg4
-        if activeTab == "LIVE" and not previewingLabel and session and session.design then
+        if activeTab == "LIVE" and not selectedDesignId and session and session.design then
             SyncModelAnd2D(session.design, varIdx, delta)
         end
         if votesCleared then
-            if voteResetFlashTimer and voteResetFlashTimer.Cancel then
-                voteResetFlashTimer:Cancel()
-            end
-            win.yourVoteText:SetText("|cffffcc44" .. GTV.L.VOTE_RESET_NOTICE .. "|r")
-            voteResetFlashTimer = C_Timer.NewTimer and C_Timer.NewTimer(4.0, function()
-                voteResetFlashTimer = nil
-                if win and win:IsShown() then
-                    UI_MemberWindow:RefreshLiveVoteButtons()
-                end
-            end) or nil
+            ShowToast(GTV.L.VOTE_RESET_NOTICE, 1.0, 0.85, 0.35)
         end
         UI_MemberWindow:Refresh()
     elseif eventName == "VOTES_RESET" then
-        win.yourVoteText:SetText("|cffffcc44" .. GTV.L.VOTE_RESET_MANUAL .. "|r")
+        ShowToast(GTV.L.VOTE_RESET_MANUAL, 1.0, 0.85, 0.35)
         GTV:PlaySound("IG_MAINMENU_OPTION", 852)
         UI_MemberWindow:Refresh()
     elseif eventName == "SESSION_ENDED" then
-        previewingLabel = nil
-        if win.previewBanner then
-            win.previewBanner:Hide()
+        if win.returnLiveBtn then
+            win.returnLiveBtn:Hide()
         end
         UI_MemberWindow:Refresh()
     else

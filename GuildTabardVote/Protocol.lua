@@ -4,12 +4,11 @@ local Protocol = {}
 GTV.Protocol = Protocol
 
 local MSG_THROTTLE = 0.12
-local SUGGESTION_COOLDOWN = 3.0
+local SUGGESTION_COOLDOWN = 2.0
 
--- Live session state
 Protocol.session = nil
 Protocol.lastSyncReplyAt = 0
-Protocol.lastTimedSyncReplyAt = 0
+Protocol.lastBoardSyncReplyAt = 0
 Protocol.lastSuggestionSentAt = 0
 Protocol.pendingUpdate = nil
 Protocol.updateTimerActive = false
@@ -158,18 +157,517 @@ local function CreateSessionObject(sessionId, leaderKey, leaderDisplay, autoRese
         isVendor = isVendor and true or false,
         isTestMode = isTestMode and true or false,
         leaderModel = nil,
-        -- Strictly anonymous maps keyed by voterHash (NEVER player names!)
-        participants = {},   -- [voterHash] = "JOIN" | "ABSTAIN"
-        votes = {},          -- [voterHash] = "UP" | "DOWN"
-        suggestions = {},    -- array of { id, authorName, note, design, votes = { [voterHash] = "UP"|"DOWN" } }
-        suggestionById = {},
-        myDecision = nil,    -- "JOIN" | "ABSTAIN" | nil
-        myVote = nil,        -- "UP" | "DOWN" | nil
+        participants = {}, -- [voterHash] = "JOIN" | "ABSTAIN"
+        votes = {},        -- [voterHash] = "UP" | "DOWN"
+        myDecision = nil,
+        myVote = nil,
     }
 end
 
 -- =========================================================================
--- LIVE SESSION (GUILD LEADER)
+-- UNIFIED PERSISTENT GUILD DESIGN BOARD (ALWAYS AVAILABLE IN ANY GUILD!)
+-- =========================================================================
+function Protocol:GetGuildBoard(createIfMissing)
+    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
+    if not gKey then
+        return nil
+    end
+    local board = GTV.Storage:GetGuildBoard(gKey, createIfMissing)
+    if board and board.timedPoll and board.timedPoll.status == "ACTIVE" then
+        if GTV.Storage:Now() >= (board.timedPoll.endsAt or 0) then
+            board.timedPoll.status = "EXPIRED"
+        end
+    end
+    return board
+end
+
+function Protocol:GetGuildDesigns()
+    local board = self:GetGuildBoard(false)
+    return (board and board.designs) or {}
+end
+
+function Protocol:GetActiveTimedPoll()
+    local board = self:GetGuildBoard(false)
+    return board and board.timedPoll or nil
+end
+
+function Protocol:IsTimedPollOpen(poll)
+    poll = poll or self:GetActiveTimedPoll()
+    if not poll then
+        return false
+    end
+    if poll.status ~= "ACTIVE" then
+        return false
+    end
+    return GTV.Storage:Now() < (poll.endsAt or 0)
+end
+
+-- Voting & submitting on the Guild Board is ALWAYS open unless a Timed Poll explicitly ended/closed!
+function Protocol:IsGuildBoardOpenForChanges()
+    local board = self:GetGuildBoard(true)
+    if not board then
+        return false, GTV.L.SUGG_NEED_GUILD
+    end
+    local poll = board.timedPoll
+    if poll and (poll.status == "CLOSED" or poll.status == "EXPIRED") then
+        return false, GTV.L.TIMED_VOTING_LOCKED
+    end
+    return true, nil
+end
+
+function Protocol:SubmitGuildDesign(design, note, bypassCooldown)
+    local okOpen, errMsg = self:IsGuildBoardOpenForChanges()
+    if not okOpen then
+        GTV:Print(errMsg or GTV.L.SUGG_NEED_GUILD)
+        return false, errMsg
+    end
+    if not design then
+        GTV:Print(GTV.L.SUGG_NO_DESIGN)
+        return false, GTV.L.SUGG_NO_DESIGN
+    end
+
+    local nowTick = GetTime and GetTime() or 0
+    if not bypassCooldown and (nowTick - self.lastSuggestionSentAt) < SUGGESTION_COOLDOWN then
+        GTV:Print(GTV.L.SUGG_COOLDOWN)
+        return false, GTV.L.SUGG_COOLDOWN
+    end
+    self.lastSuggestionSentAt = nowTick
+    self.suggestionCounter = self.suggestionCounter + 1
+
+    local board = self:GetGuildBoard(true)
+    local meKey = GTV:GetPlayerKey()
+    local meShort = GTV:ShortName(meKey)
+    local createdAt = GTV.Storage:Now()
+    local designId = "gd_" .. tostring(createdAt) .. "_" .. tostring(math.random(100, 999)) .. "_" .. tostring(self.suggestionCounter)
+    local cleanNote = SanitizeText(note, 34)
+
+    self:AddGuildDesignLocal(board, designId, meShort, meKey, createdAt, design, cleanNote)
+
+    local msg = table.concat({
+        "GB_ADD",
+        designId,
+        SanitizeText(meShort, 24),
+        tostring(createdAt),
+        SerializeDesign(design),
+        cleanNote,
+    }, "|")
+    self:SendGuild(msg)
+
+    if not bypassCooldown then
+        GTV:Print(GTV.L.SUGG_SENT)
+    end
+    return true, designId
+end
+
+function Protocol:AddGuildDesignLocal(board, designId, authorName, authorKey, createdAt, design, note)
+    if not board or not designId then
+        return false
+    end
+    if board.deletedIds[designId] or board.designById[designId] then
+        return false
+    end
+    local entry = {
+        id = designId,
+        authorName = authorName or "Unknown",
+        authorKey = authorKey or "",
+        createdAt = tonumber(createdAt) or GTV.Storage:Now(),
+        note = note or "",
+        design = GTV.TabardSync:CopyDesign(design),
+    }
+    table.insert(board.designs, 1, entry)
+    board.designById[designId] = entry
+    FireCallbacks("GUILD_BOARD_CHANGED", board, entry)
+    return true
+end
+
+function Protocol:CanDeleteDesign(entry)
+    if not entry then
+        return false
+    end
+    if self:IsTestModeActive() or GTV:IsGuildLeader() then
+        return true
+    end
+    local meKey = GTV:GetPlayerKey()
+    local meShort = GTV:ShortName(meKey)
+    return (entry.authorKey and entry.authorKey == meKey) or (entry.authorName == meShort)
+end
+
+function Protocol:DeleteGuildDesign(designId)
+    local board = self:GetGuildBoard(false)
+    if not board or not board.designById[designId] then
+        return false
+    end
+    if not self:CanDeleteDesign(board.designById[designId]) then
+        return false
+    end
+    self:RemoveGuildDesignLocal(board, designId)
+    self:SendGuild(table.concat({ "GB_DEL", designId }, "|"))
+    GTV:Print(GTV.L.SUGG_DELETED)
+    return true
+end
+
+function Protocol:RemoveGuildDesignLocal(board, designId)
+    if not board or not designId then
+        return false
+    end
+    board.deletedIds[designId] = true
+    board.designById[designId] = nil
+    for i, d in ipairs(board.designs) do
+        if d.id == designId then
+            table.remove(board.designs, i)
+            break
+        end
+    end
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+    return true
+end
+
+-- Cast an anonymous UP/DOWN vote on ANY design on the Guild Board
+function Protocol:VoteGuildDesign(designId, vote)
+    local okOpen, errMsg = self:IsGuildBoardOpenForChanges()
+    if not okOpen then
+        GTV:Print(errMsg or GTV.L.TIMED_VOTING_LOCKED)
+        return false, nil
+    end
+    local board = self:GetGuildBoard(true)
+    if not board or not board.designById[designId] then
+        return false, nil
+    end
+
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local hash = GTV.Storage:GetVoterHash(scopeId)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+
+    if myBallot.votes[designId] == vote then
+        vote = "NONE"
+    end
+    myBallot.abstained = false
+    myBallot.votes[designId] = (vote ~= "NONE") and vote or nil
+
+    ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+    ballots[hash].abstained = false
+    ballots[hash].votes[designId] = myBallot.votes[designId]
+
+    self:SendGuild(table.concat({ "GB_VOTE", scopeId, hash, designId, vote }, "|"))
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+    return true, vote
+end
+
+function Protocol:SetTimedPollAbstain(abstain)
+    local okOpen, errMsg = self:IsGuildBoardOpenForChanges()
+    if not okOpen then
+        GTV:Print(errMsg or GTV.L.TIMED_VOTING_LOCKED)
+        return false
+    end
+    local board = self:GetGuildBoard(true)
+    if not board then
+        return false
+    end
+
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local hash = GTV.Storage:GetVoterHash(scopeId)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+
+    myBallot.abstained = abstain and true or false
+    if myBallot.abstained then
+        wipe(myBallot.votes)
+    end
+
+    ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+    ballots[hash].abstained = myBallot.abstained
+    if myBallot.abstained then
+        wipe(ballots[hash].votes)
+    end
+
+    self:SendGuild(table.concat({ "GB_ABSTAIN", scopeId, hash, myBallot.abstained and "1" or "0" }, "|"))
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+    return true
+end
+
+-- GM-Only anonymous vote counts per design
+function Protocol:GetDesignVotes(designId)
+    local up, down = 0, 0
+    local board = self:GetGuildBoard(false)
+    if not board then
+        return up, down
+    end
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+    for _, b in pairs(ballots) do
+        if not b.abstained and b.votes then
+            local v = b.votes[designId]
+            if v == "UP" then
+                up = up + 1
+            elseif v == "DOWN" then
+                down = down + 1
+            end
+        end
+    end
+    return up, down
+end
+
+function Protocol:GetBoardStats()
+    local designCount, voters, abstained = 0, 0, 0
+    local board = self:GetGuildBoard(false)
+    if not board then
+        return designCount, voters, abstained
+    end
+    designCount = #board.designs
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+    for _, b in pairs(ballots) do
+        if b.abstained then
+            abstained = abstained + 1
+        elseif b.votes and next(b.votes) ~= nil then
+            voters = voters + 1
+        end
+    end
+    return designCount, voters, abstained
+end
+
+-- =========================================================================
+-- TIMED MULTI-DAY POLLS (ON TOP OF UNIFIED GUILD BOARD)
+-- =========================================================================
+function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign, keepExisting)
+    local isTest = self:IsTestModeActive()
+    if not isTest then
+        if not IsInGuild() then
+            GTV:Print(GTV.L.LEADER_NO_GUILD)
+            return nil
+        end
+        if not GTV:IsGuildLeader() then
+            GTV:Print(GTV.L.LEADER_NOT_LEADER)
+            return nil
+        end
+    end
+
+    local board = self:GetGuildBoard(true)
+    if not board then
+        return nil
+    end
+
+    if keepExisting == false then
+        for _, d in ipairs(board.designs) do
+            board.deletedIds[d.id] = true
+        end
+        wipe(board.designs)
+        wipe(board.designById)
+    end
+
+    local now = GTV.Storage:Now()
+    durationSeconds = math.max(300, tonumber(durationSeconds) or (3 * 86400))
+    local cleanTitle = SanitizeText(title, 34)
+    if cleanTitle == "" then
+        cleanTitle = GTV.L.TIMED_TITLE_DEFAULT
+    end
+
+    local meShort = GTV:ShortName(GTV:GetPlayerKey())
+    local pollId = "tp_" .. tostring(now) .. "_" .. tostring(math.random(100, 999))
+    board.timedPoll = {
+        id = pollId,
+        title = cleanTitle,
+        leaderName = meShort,
+        createdAt = now,
+        endsAt = now + durationSeconds,
+        status = "ACTIVE",
+        winnerDesignId = nil,
+    }
+    GTV.Storage:MarkPollPrompted(pollId)
+
+    local metaMsg = table.concat({
+        "TP_META",
+        pollId,
+        tostring(now),
+        tostring(now + durationSeconds),
+        "ACTIVE",
+        SanitizeText(meShort, 24),
+        cleanTitle,
+        keepExisting == false and "0" or "1",
+    }, "|")
+    self:SendGuild(metaMsg)
+
+    if initialDesign then
+        self:SubmitGuildDesign(initialDesign, cleanTitle, true)
+    end
+
+    local remText = GTV.Storage:FormatRemaining(board.timedPoll.endsAt)
+    GTV:Print(string.format(GTV.L.TIMED_STARTED_CHAT, remText))
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+    return board.timedPoll
+end
+
+function Protocol:CloseTimedPoll(winnerDesignId)
+    local board = self:GetGuildBoard(false)
+    if not board or not board.timedPoll then
+        return
+    end
+    if not self:IsTestModeActive() and not GTV:IsGuildLeader() then
+        return
+    end
+    local poll = board.timedPoll
+    poll.status = "CLOSED"
+    if winnerDesignId and winnerDesignId ~= "" then
+        poll.winnerDesignId = winnerDesignId
+    else
+        local bestId, bestScore = nil, -999999
+        for _, d in ipairs(board.designs) do
+            local up, down = self:GetDesignVotes(d.id)
+            if (up - down) > bestScore then
+                bestScore = up - down
+                bestId = d.id
+            end
+        end
+        poll.winnerDesignId = bestId
+    end
+    self:SendGuild(table.concat({ "TP_CLOSE", poll.id, poll.winnerDesignId or "" }, "|"))
+    GTV:Print(GTV.L.TIMED_ENDED_CHAT)
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+end
+
+function Protocol:AnnounceTimedPollWinner()
+    local board = self:GetGuildBoard(false)
+    if not board or #board.designs == 0 then
+        return
+    end
+    local poll = board.timedPoll
+    local winner = poll and poll.winnerDesignId and board.designById[poll.winnerDesignId]
+    if not winner then
+        local best, bestScore = nil, -999999
+        for _, d in ipairs(board.designs) do
+            local up, down = self:GetDesignVotes(d.id)
+            if (up - down) > bestScore then
+                bestScore = up - down
+                best = d
+            end
+        end
+        winner = best
+    end
+    if not winner then
+        return
+    end
+    local label = (winner.note and winner.note ~= "") and winner.note or winner.id
+    local text = string.format(GTV.L.TIMED_WINNER_CHAT, label, winner.authorName)
+    if not self:IsTestModeActive() and IsInGuild() and SendChatMessage then
+        pcall(SendChatMessage, "[GuildTabardVote] " .. text, "GUILD")
+    else
+        GTV:Print(text)
+    end
+end
+
+local versionNotified = false
+
+local function CompareVersions(a, b)
+    local function parse(v)
+        local p1, p2, p3 = tostring(v or "0.0.0"):match("(%d+)%.?(%d*)%.?(%d*)")
+        return tonumber(p1) or 0, tonumber(p2) or 0, tonumber(p3) or 0
+    end
+    local a1, a2, a3 = parse(a)
+    local b1, b2, b3 = parse(b)
+    if a1 ~= b1 then return a1 > b1 end
+    if a2 ~= b2 then return a2 > b2 end
+    return a3 > b3
+end
+
+-- Peer-to-peer sync of ALL Guild Designs, Timed Poll metadata, and anonymous ballots!
+function Protocol:SendGuildBoardHello()
+    if not self:IsTestModeActive() and not (IsInGuild and IsInGuild()) then
+        return
+    end
+    local board = self:GetGuildBoard(true)
+    local dCount = board and #board.designs or 0
+    local pollId = (board and board.timedPoll and board.timedPoll.id) or "0"
+    local _, vCount, aCount = self:GetBoardStats()
+    self:SendGuild(table.concat({ "GB_HELLO", tostring(dCount), pollId, tostring(vCount + aCount), GTV.VERSION }, "|"))
+end
+
+function Protocol:BroadcastGuildBoardSnapshot(board)
+    if not board then
+        return
+    end
+    local now = GetTime and GetTime() or 0
+    if (now - self.lastBoardSyncReplyAt) < 2.5 then
+        return
+    end
+    self.lastBoardSyncReplyAt = now
+
+    local delay = 0.05
+    if board.timedPoll then
+        local p = board.timedPoll
+        self:SendGuild(table.concat({
+            "TP_META",
+            p.id,
+            tostring(p.createdAt),
+            tostring(p.endsAt),
+            p.status,
+            SanitizeText(p.leaderName, 24),
+            SanitizeText(p.title, 34),
+            "1",
+        }, "|"))
+        delay = delay + 0.15
+    end
+
+    for _, d in ipairs(board.designs) do
+        local entry = d
+        C_Timer.After(delay, function()
+            self:SendGuild(table.concat({
+                "GB_ADD",
+                entry.id,
+                SanitizeText(entry.authorName, 24),
+                tostring(entry.createdAt or 0),
+                SerializeDesign(entry.design),
+                SanitizeText(entry.note, 34),
+            }, "|"))
+        end)
+        delay = delay + 0.14
+    end
+
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+    for hash, b in pairs(ballots) do
+        local h, ballot = hash, b
+        if ballot.abstained then
+            C_Timer.After(delay, function()
+                self:SendGuild(table.concat({ "GB_ABSTAIN", scopeId, h, "1" }, "|"))
+            end)
+            delay = delay + 0.12
+        elseif ballot.votes then
+            for did, v in pairs(ballot.votes) do
+                local designId, val = did, v
+                C_Timer.After(delay, function()
+                    self:SendGuild(table.concat({ "GB_VOTE", scopeId, h, designId, val }, "|"))
+                end)
+                delay = delay + 0.12
+            end
+        end
+    end
+
+    if board.timedPoll and board.timedPoll.status == "CLOSED" then
+        local p = board.timedPoll
+        C_Timer.After(delay, function()
+            self:SendGuild(table.concat({ "TP_CLOSE", p.id, p.winnerDesignId or "" }, "|"))
+        end)
+    end
+end
+
+function Protocol:OnLoginSync()
+    if not IsInGuild or not IsInGuild() then
+        return
+    end
+    self:SendGuildBoardHello()
+    local poll = self:GetActiveTimedPoll()
+    if poll and self:IsTimedPollOpen(poll) and not GTV.Storage:WasPollPrompted(poll.id) and not GTV:IsGuildLeader() then
+        GTV.Storage:MarkPollPrompted(poll.id)
+        local rem = GTV.Storage:FormatRemaining(poll.endsAt)
+        if GTV.UI_Prompt then
+            GTV.UI_Prompt:ShowTimedInvite(poll.leaderName, poll.id, rem)
+        end
+    end
+end
+
+-- =========================================================================
+-- LIVE SESSION (GUILD LEADER AT TABARD REGISTRAR OR /wappen start)
 -- =========================================================================
 function Protocol:StartLeaderSession(model, isStandalone, isTestMode)
     if not isTestMode then
@@ -196,15 +694,13 @@ function Protocol:StartLeaderSession(model, isStandalone, isTestMode)
     self.session.participants[myHash] = "JOIN"
     self.session.myDecision = "JOIN"
 
-    local msg = table.concat({
+    self:SendGuild(table.concat({
         "OPEN",
         sessionId,
         SanitizeText(meShort, 24),
         autoReset and "1" or "0",
         SerializeDesign(design),
-    }, "|")
-
-    self:SendGuild(msg)
+    }, "|"))
 
     if not isTestMode then
         GTV:Print(GTV.L.LEADER_SESSION_STARTED)
@@ -220,14 +716,13 @@ function Protocol:ReinviteGuild()
     local s = self.session
     local design = (s.leaderModel and GTV.TabardSync:ReadModel(s.leaderModel)) or s.design
     s.design = GTV.TabardSync:CopyDesign(design) or s.design
-    local msg = table.concat({
+    self:SendGuild(table.concat({
         "OPEN",
         s.id,
         SanitizeText(s.leaderName, 24),
         s.autoReset and "1" or "0",
         SerializeDesign(s.design),
-    }, "|")
-    self:SendGuild(msg)
+    }, "|"))
 end
 
 function Protocol:SetAutoReset(enabled)
@@ -235,15 +730,14 @@ function Protocol:SetAutoReset(enabled)
     if self:IsLeading() then
         self.session.autoReset = GTV.db.autoResetVotes
         local s = self.session
-        local msg = table.concat({
+        self:SendGuild(table.concat({
             "SYNC_STATE",
             s.id,
             SanitizeText(s.leaderName, 24),
             tostring(s.rev),
             s.autoReset and "1" or "0",
             SerializeDesign(s.design),
-        }, "|")
-        self:SendGuild(msg)
+        }, "|"))
         FireCallbacks("STATE_CHANGED", s)
     end
 end
@@ -253,12 +747,7 @@ function Protocol:EndLeaderSession(wasSaved)
         return
     end
     local s = self.session
-    local msg = table.concat({
-        "CLOSE",
-        s.id,
-        wasSaved and "1" or "0",
-    }, "|")
-    self:SendGuild(msg)
+    self:SendGuild(table.concat({ "CLOSE", s.id, wasSaved and "1" or "0" }, "|"))
     self.pendingUpdate = nil
     self.session = nil
     if not s.isTestMode then
@@ -299,15 +788,14 @@ function Protocol:OnLeaderModelChanged(model, varIndex, delta, forceImmediate)
             s.myVote = nil
         end
 
-        local msg = table.concat({
+        self:SendGuild(table.concat({
             "UPDATE",
             s.id,
             tostring(s.rev),
             tostring(p.varIndex),
             tostring(p.delta),
             SerializeDesign(design),
-        }, "|")
-        self:SendGuild(msg)
+        }, "|"))
         FireCallbacks("DESIGN_UPDATED", s, p.varIndex, p.delta, s.autoReset)
     end
 
@@ -327,12 +815,10 @@ function Protocol:ResetVotes()
     s.rev = s.rev + 1
     wipe(s.votes)
     s.myVote = nil
-    local msg = table.concat({ "RESETV", s.id, tostring(s.rev) }, "|")
-    self:SendGuild(msg)
+    self:SendGuild(table.concat({ "RESETV", s.id, tostring(s.rev) }, "|"))
     FireCallbacks("VOTES_RESET", s, true)
 end
 
--- Apply any design directly to the Guild Master's active TabardModel (vendor or standalone)
 function Protocol:ApplyDesignToLeaderModel(design, onDone)
     local model = nil
     if self.session and self.session.leaderModel then
@@ -360,21 +846,6 @@ function Protocol:ApplyDesignToLeaderModel(design, onDone)
     return true
 end
 
-function Protocol:ApplySuggestion(suggId)
-    local s = self.session
-    if not s then
-        return
-    end
-    local sugg = s.suggestionById[suggId]
-    if not sugg then
-        return
-    end
-    self:ApplyDesignToLeaderModel(sugg.design)
-end
-
--- =========================================================================
--- LIVE SESSION (MEMBER ACTIONS — ANONYMOUS)
--- =========================================================================
 function Protocol:SendParticipation(status)
     local s = self.session
     if not s then
@@ -400,7 +871,7 @@ end
 function Protocol:SendVote(vote)
     local s = self.session
     if not s then
-        return
+        return false, nil
     end
     local hash = GTV.Storage:GetVoterHash(s.id)
     if s.myVote == vote then
@@ -417,56 +888,7 @@ function Protocol:SendVote(vote)
     end
     self:SendGuild(table.concat({ "VOTE", s.id, tostring(s.rev), hash, vote }, "|"))
     FireCallbacks("VOTES_CHANGED", s)
-end
-
-function Protocol:SendSuggestion(design, note)
-    local s = self.session
-    if not s or not design then
-        return false
-    end
-    local now = GetTime and GetTime() or 0
-    if (now - self.lastSuggestionSentAt) < SUGGESTION_COOLDOWN then
-        GTV:Print(GTV.L.SUGG_COOLDOWN)
-        return false
-    end
-    self.lastSuggestionSentAt = now
-    self.suggestionCounter = self.suggestionCounter + 1
-
-    local meShort = GTV:ShortName(GTV:GetPlayerKey())
-    local suggId = SanitizeText(meShort, 14) .. "-" .. tostring(GTV.Storage:Now()) .. "-" .. tostring(self.suggestionCounter)
-    local cleanNote = SanitizeText(note, 36)
-
-    self:AddSuggestionLocal(suggId, meShort, design, cleanNote)
-
-    local msg = table.concat({
-        "SUGG",
-        s.id,
-        suggId,
-        SanitizeText(meShort, 24),
-        SerializeDesign(design),
-        cleanNote,
-    }, "|")
-    self:SendGuild(msg)
-    GTV:Print(GTV.L.SUGG_SENT)
-    return true
-end
-
-function Protocol:VoteLiveSuggestion(suggId, vote)
-    local s = self.session
-    if not s then
-        return
-    end
-    local sugg = s.suggestionById[suggId]
-    if not sugg then
-        return
-    end
-    local hash = GTV.Storage:GetVoterHash(s.id)
-    if sugg.votes[hash] == vote then
-        vote = "NONE"
-    end
-    sugg.votes[hash] = (vote ~= "NONE") and vote or nil
-    self:SendGuild(table.concat({ "SVOTE", s.id, suggId, hash, vote }, "|"))
-    FireCallbacks("SUGGESTIONS_CHANGED", s)
+    return true, vote
 end
 
 function Protocol:RequestSync()
@@ -474,25 +896,6 @@ function Protocol:RequestSync()
     self:SendGuild(table.concat({ "SYNC_REQ", sid }, "|"))
 end
 
-function Protocol:AddSuggestionLocal(suggId, authorName, design, note)
-    local s = self.session
-    if not s or s.suggestionById[suggId] then
-        return false
-    end
-    local entry = {
-        id = suggId,
-        authorName = authorName,
-        note = note or "",
-        design = GTV.TabardSync:CopyDesign(design),
-        votes = {}, -- [voterHash] = "UP" | "DOWN"
-    }
-    table.insert(s.suggestions, entry)
-    s.suggestionById[suggId] = entry
-    FireCallbacks("SUGGESTIONS_CHANGED", s, entry)
-    return true
-end
-
--- Strictly anonymous vote counts (returns numbers only — NO player names!)
 function Protocol:GetVoteCounts()
     local up, down, abstain, active = 0, 0, 0, 0
     local s = self.session
@@ -519,458 +922,6 @@ function Protocol:GetVoteCounts()
     return up, down, abstain, active
 end
 
-function Protocol:GetLiveSuggestionCounts(sugg)
-    local up, down = 0, 0
-    if sugg and sugg.votes then
-        for _, v in pairs(sugg.votes) do
-            if v == "UP" then
-                up = up + 1
-            elseif v == "DOWN" then
-                down = down + 1
-            end
-        end
-    end
-    return up, down
-end
-
--- =========================================================================
--- TIMED MULTI-DAY POLLS (PERSISTENT, ANONYMOUS, GM-ONLY RESULTS)
--- =========================================================================
-local function EnsureTimedPollIndexes(poll)
-    if not poll then
-        return nil
-    end
-    poll.designs = poll.designs or {}
-    poll.designById = {}
-    for _, d in ipairs(poll.designs) do
-        poll.designById[d.id] = d
-    end
-    poll.ballots = poll.ballots or {} -- [voterHash] = { abstained = bool, votes = { [designId] = "UP"|"DOWN" } }
-    return poll
-end
-
-function Protocol:GetActiveTimedPoll()
-    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-    if not gKey then
-        return nil
-    end
-    local poll = EnsureTimedPollIndexes(GTV.Storage:GetTimedPoll(gKey))
-    if not poll then
-        return nil
-    end
-    -- Auto-check expiration
-    if poll.status == "ACTIVE" and GTV.Storage:Now() >= (poll.endsAt or 0) then
-        poll.status = "EXPIRED"
-        GTV.Storage:SetTimedPoll(gKey, poll)
-    end
-    return poll
-end
-
-function Protocol:IsTimedPollOpen(poll)
-    poll = poll or self:GetActiveTimedPoll()
-    if not poll then
-        return false
-    end
-    if poll.status ~= "ACTIVE" then
-        return false
-    end
-    return GTV.Storage:Now() < (poll.endsAt or 0)
-end
-
--- Guild Master creates a new X-day (or X-seconds) timed poll
-function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign)
-    local isTest = self:IsTestModeActive()
-    if not isTest then
-        if not IsInGuild() then
-            GTV:Print(GTV.L.LEADER_NO_GUILD)
-            return nil
-        end
-        if not GTV:IsGuildLeader() then
-            GTV:Print(GTV.L.LEADER_NOT_LEADER)
-            return nil
-        end
-    end
-
-    local gKey = GTV.Storage:GetGuildKey(isTest)
-    if not gKey then
-        return nil
-    end
-
-    local now = GTV.Storage:Now()
-    durationSeconds = math.max(300, tonumber(durationSeconds) or (3 * 86400))
-    local cleanTitle = SanitizeText(title, 34)
-    if cleanTitle == "" then
-        cleanTitle = GTV.L.TIMED_TITLE_DEFAULT
-    end
-
-    local meShort = GTV:ShortName(GTV:GetPlayerKey())
-    local pollId = "tp_" .. tostring(now) .. "_" .. tostring(math.random(100, 999))
-    local poll = EnsureTimedPollIndexes({
-        id = pollId,
-        title = cleanTitle,
-        leaderName = meShort,
-        createdAt = now,
-        endsAt = now + durationSeconds,
-        status = "ACTIVE",
-        winnerDesignId = nil,
-        designs = {},
-        ballots = {},
-    })
-
-    GTV.Storage:SetTimedPoll(gKey, poll)
-    GTV.Storage:MarkPollPrompted(pollId)
-
-    -- Broadcast poll metadata
-    local metaMsg = table.concat({
-        "TP_META",
-        poll.id,
-        tostring(poll.createdAt),
-        tostring(poll.endsAt),
-        poll.status,
-        SanitizeText(poll.leaderName, 24),
-        poll.title,
-    }, "|")
-    self:SendGuild(metaMsg)
-
-    -- Optionally include leader's current tabard as first design
-    if initialDesign then
-        self:SubmitTimedPollDesign(initialDesign, cleanTitle, true)
-    end
-
-    local remText = GTV.Storage:FormatRemaining(poll.endsAt)
-    GTV:Print(string.format(GTV.L.TIMED_STARTED_CHAT, remText))
-    FireCallbacks("TIMED_POLL_CHANGED", poll)
-    return poll
-end
-
-function Protocol:SubmitTimedPollDesign(design, note, bypassCooldown)
-    local poll = self:GetActiveTimedPoll()
-    if not poll then
-        return false
-    end
-    if not self:IsTimedPollOpen(poll) then
-        GTV:Print(GTV.L.TIMED_VOTING_LOCKED)
-        return false
-    end
-    if not design then
-        return false
-    end
-
-    local nowTick = GetTime and GetTime() or 0
-    if not bypassCooldown and (nowTick - self.lastSuggestionSentAt) < SUGGESTION_COOLDOWN then
-        GTV:Print(GTV.L.SUGG_COOLDOWN)
-        return false
-    end
-    self.lastSuggestionSentAt = nowTick
-    self.suggestionCounter = self.suggestionCounter + 1
-
-    local meShort = GTV:ShortName(GTV:GetPlayerKey())
-    local designId = "td_" .. tostring(GTV.Storage:Now()) .. "_" .. tostring(math.random(100, 999)) .. "_" .. tostring(self.suggestionCounter)
-    local cleanNote = SanitizeText(note, 34)
-    local createdAt = GTV.Storage:Now()
-
-    self:AddTimedDesignLocal(poll, designId, meShort, createdAt, design, cleanNote)
-
-    local msg = table.concat({
-        "TP_DESIGN",
-        poll.id,
-        designId,
-        SanitizeText(meShort, 24),
-        tostring(createdAt),
-        SerializeDesign(design),
-        cleanNote,
-    }, "|")
-    self:SendGuild(msg)
-
-    if not bypassCooldown then
-        GTV:Print(GTV.L.SUGG_SENT)
-    end
-    return true
-end
-
-function Protocol:AddTimedDesignLocal(poll, designId, authorName, createdAt, design, note)
-    EnsureTimedPollIndexes(poll)
-    if poll.designById[designId] then
-        return false
-    end
-    local entry = {
-        id = designId,
-        authorName = authorName or "Unknown",
-        createdAt = tonumber(createdAt) or GTV.Storage:Now(),
-        note = note or "",
-        design = GTV.TabardSync:CopyDesign(design),
-    }
-    table.insert(poll.designs, entry)
-    poll.designById[designId] = entry
-    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-    if gKey then
-        GTV.Storage:SetTimedPoll(gKey, poll)
-    end
-    FireCallbacks("TIMED_POLL_CHANGED", poll)
-    return true
-end
-
--- Cast an anonymous Thumbs Up / Down vote on a specific design in the Timed Poll
-function Protocol:VoteTimedDesign(designId, vote)
-    local poll = self:GetActiveTimedPoll()
-    if not poll or not self:IsTimedPollOpen(poll) then
-        GTV:Print(GTV.L.TIMED_VOTING_LOCKED)
-        return
-    end
-    EnsureTimedPollIndexes(poll)
-    if not poll.designById[designId] then
-        return
-    end
-
-    local myBallot = GTV.Storage:GetMyBallot(poll.id)
-    local hash = GTV.Storage:GetVoterHash(poll.id)
-
-    -- Toggle off if same vote clicked again
-    if myBallot.votes[designId] == vote then
-        vote = "NONE"
-    end
-    myBallot.abstained = false
-    myBallot.votes[designId] = (vote ~= "NONE") and vote or nil
-
-    -- Store under anonymous voterHash in local poll cache
-    poll.ballots[hash] = poll.ballots[hash] or { abstained = false, votes = {} }
-    poll.ballots[hash].abstained = false
-    poll.ballots[hash].votes[designId] = myBallot.votes[designId]
-
-    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-    if gKey then
-        GTV.Storage:SetTimedPoll(gKey, poll)
-    end
-
-    self:SendGuild(table.concat({ "TP_VOTE", poll.id, hash, designId, vote }, "|"))
-    FireCallbacks("TIMED_POLL_CHANGED", poll)
-end
-
--- Toggle "Enthalten" (Abstain) for the entire Timed Poll (anonymous)
-function Protocol:SetTimedPollAbstain(abstain)
-    local poll = self:GetActiveTimedPoll()
-    if not poll or not self:IsTimedPollOpen(poll) then
-        return
-    end
-    EnsureTimedPollIndexes(poll)
-
-    local myBallot = GTV.Storage:GetMyBallot(poll.id)
-    local hash = GTV.Storage:GetVoterHash(poll.id)
-
-    myBallot.abstained = abstain and true or false
-    if myBallot.abstained then
-        wipe(myBallot.votes)
-    end
-
-    poll.ballots[hash] = poll.ballots[hash] or { abstained = false, votes = {} }
-    poll.ballots[hash].abstained = myBallot.abstained
-    if myBallot.abstained then
-        wipe(poll.ballots[hash].votes)
-    end
-
-    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-    if gKey then
-        GTV.Storage:SetTimedPoll(gKey, poll)
-    end
-
-    self:SendGuild(table.concat({ "TP_ABSTAIN", poll.id, hash, myBallot.abstained and "1" or "0" }, "|"))
-    FireCallbacks("TIMED_POLL_CHANGED", poll)
-end
-
-function Protocol:CloseTimedPoll(winnerDesignId)
-    local poll = self:GetActiveTimedPoll()
-    if not poll then
-        return
-    end
-    if not self:IsTestModeActive() and not GTV:IsGuildLeader() then
-        return
-    end
-    poll.status = "CLOSED"
-    if winnerDesignId and winnerDesignId ~= "" then
-        poll.winnerDesignId = winnerDesignId
-    else
-        -- Pick highest score automatically if none passed
-        local bestId, bestScore = nil, -999999
-        for _, d in ipairs(poll.designs) do
-            local up, down = self:GetTimedDesignVotes(poll, d.id)
-            local score = up - down
-            if score > bestScore then
-                bestScore = score
-                bestId = d.id
-            end
-        end
-        poll.winnerDesignId = bestId
-    end
-    local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-    if gKey then
-        GTV.Storage:SetTimedPoll(gKey, poll)
-    end
-
-    self:SendGuild(table.concat({ "TP_CLOSE", poll.id, poll.winnerDesignId or "" }, "|"))
-    GTV:Print(GTV.L.TIMED_ENDED_CHAT)
-    FireCallbacks("TIMED_POLL_CHANGED", poll)
-end
-
-function Protocol:AnnounceTimedPollWinner()
-    local poll = self:GetActiveTimedPoll()
-    if not poll then
-        return
-    end
-    EnsureTimedPollIndexes(poll)
-    local winner = poll.winnerDesignId and poll.designById[poll.winnerDesignId]
-    if not winner then
-        local best, bestScore = nil, -999999
-        for _, d in ipairs(poll.designs) do
-            local up, down = self:GetTimedDesignVotes(poll, d.id)
-            if (up - down) > bestScore then
-                bestScore = up - down
-                best = d
-            end
-        end
-        winner = best
-    end
-    if not winner then
-        return
-    end
-    local label = (winner.note and winner.note ~= "") and winner.note or winner.id
-    local text = string.format(GTV.L.TIMED_WINNER_CHAT, label, winner.authorName)
-    if not self:IsTestModeActive() and IsInGuild() and SendChatMessage then
-        pcall(SendChatMessage, "[GuildTabardVote] " .. text, "GUILD")
-    else
-        GTV:Print(text)
-    end
-end
-
--- GM-only anonymous vote tallies per design in Timed Poll
-function Protocol:GetTimedDesignVotes(poll, designId)
-    local up, down = 0, 0
-    if not poll or not poll.ballots then
-        return up, down
-    end
-    for _, b in pairs(poll.ballots) do
-        if not b.abstained and b.votes then
-            local v = b.votes[designId]
-            if v == "UP" then
-                up = up + 1
-            elseif v == "DOWN" then
-                down = down + 1
-            end
-        end
-    end
-    return up, down
-end
-
-function Protocol:GetTimedPollStats(poll)
-    local designCount, voters, abstained = 0, 0, 0
-    if not poll then
-        return designCount, voters, abstained
-    end
-    designCount = #(poll.designs or {})
-    if poll.ballots then
-        for _, b in pairs(poll.ballots) do
-            if b.abstained then
-                abstained = abstained + 1
-            elseif b.votes and next(b.votes) ~= nil then
-                voters = voters + 1
-            end
-        end
-    end
-    return designCount, voters, abstained
-end
-
--- Peer-to-peer multi-day sync on login / open
-function Protocol:SendTimedPollHello()
-    if not self:IsTestModeActive() and not IsInGuild() then
-        return
-    end
-    local poll = self:GetActiveTimedPoll()
-    local pid = poll and poll.id or "0"
-    local dCount = poll and #(poll.designs or {}) or 0
-    local _, vCount, aCount = self:GetTimedPollStats(poll)
-    self:SendGuild(table.concat({ "TP_HELLO", pid, tostring(dCount), tostring(vCount + aCount) }, "|"))
-end
-
-function Protocol:BroadcastTimedPollSnapshot(poll)
-    if not poll then
-        return
-    end
-    local now = GetTime and GetTime() or 0
-    if (now - self.lastTimedSyncReplyAt) < 3.0 then
-        return
-    end
-    self.lastTimedSyncReplyAt = now
-
-    local metaMsg = table.concat({
-        "TP_META",
-        poll.id,
-        tostring(poll.createdAt),
-        tostring(poll.endsAt),
-        poll.status,
-        SanitizeText(poll.leaderName, 24),
-        SanitizeText(poll.title, 34),
-    }, "|")
-    self:SendGuild(metaMsg)
-
-    local delay = 0.2
-    for _, d in ipairs(poll.designs or {}) do
-        local entry = d
-        C_Timer.After(delay, function()
-            local smsg = table.concat({
-                "TP_DESIGN",
-                poll.id,
-                entry.id,
-                SanitizeText(entry.authorName, 24),
-                tostring(entry.createdAt or 0),
-                SerializeDesign(entry.design),
-                SanitizeText(entry.note, 34),
-            }, "|")
-            self:SendGuild(smsg)
-        end)
-        delay = delay + 0.18
-    end
-
-    -- Relay anonymous cached ballots (so votes cast while GM was offline reach the GM!)
-    for hash, b in pairs(poll.ballots or {}) do
-        local h = hash
-        local ballot = b
-        if ballot.abstained then
-            C_Timer.After(delay, function()
-                self:SendGuild(table.concat({ "TP_ABSTAIN", poll.id, h, "1" }, "|"))
-            end)
-            delay = delay + 0.15
-        elseif ballot.votes then
-            for did, v in pairs(ballot.votes) do
-                local designId, val = did, v
-                C_Timer.After(delay, function()
-                    self:SendGuild(table.concat({ "TP_VOTE", poll.id, h, designId, val }, "|"))
-                end)
-                delay = delay + 0.15
-            end
-        end
-    end
-
-    if poll.status == "CLOSED" then
-        C_Timer.After(delay, function()
-            self:SendGuild(table.concat({ "TP_CLOSE", poll.id, poll.winnerDesignId or "" }, "|"))
-        end)
-    end
-end
-
-function Protocol:OnLoginSync()
-    if not IsInGuild or not IsInGuild() then
-        return
-    end
-    self:SendTimedPollHello()
-    local poll = self:GetActiveTimedPoll()
-    if poll and self:IsTimedPollOpen(poll) and not GTV.Storage:WasPollPrompted(poll.id) and not GTV:IsGuildLeader() then
-        GTV.Storage:MarkPollPrompted(poll.id)
-        local rem = GTV.Storage:FormatRemaining(poll.endsAt)
-        if GTV.UI_Prompt then
-            GTV.UI_Prompt:ShowTimedInvite(poll.leaderName, poll.id, rem)
-        end
-    end
-end
-
 -- =========================================================================
 -- INCOMING PROTOCOL DISPATCHER
 -- =========================================================================
@@ -986,16 +937,151 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
     local myKey = GTV:GetPlayerKey()
     local isSelf = (senderKey == myKey)
 
+    -- ---------------- GUILD DESIGN BOARD MESSAGES ----------------
+    if cmd == "GB_ADD" then
+        local designId = parts[2]
+        local authorName = (parts[3] and parts[3] ~= "") and parts[3] or senderShort
+        local createdAt = tonumber(parts[4]) or GTV.Storage:Now()
+        local design = ParseDesign(parts[5], parts[6], parts[7], parts[8], parts[9], parts[10])
+        local note = parts[11] or ""
+        if isSelf then return end
+        local board = self:GetGuildBoard(true)
+        if board and self:AddGuildDesignLocal(board, designId, authorName, senderKey, createdAt, design, note) then
+            GTV:PlaySound("IG_QUEST_LIST_OPEN", 844)
+            GTV:Print(string.format(GTV.L.SUGG_RECEIVED, authorName))
+        end
+
+    elseif cmd == "GB_DEL" then
+        local designId = parts[2]
+        if isSelf or not designId then return end
+        local board = self:GetGuildBoard(false)
+        if board then
+            self:RemoveGuildDesignLocal(board, designId)
+        end
+
+    elseif cmd == "GB_VOTE" then
+        local scopeId, hash, designId, vote = parts[2], parts[3], parts[4], parts[5]
+        if isSelf or not scopeId or not hash or not designId then return end
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+        ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+        ballots[hash].abstained = false
+        ballots[hash].votes[designId] = (vote == "UP" or vote == "DOWN") and vote or nil
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
+    elseif cmd == "GB_ABSTAIN" then
+        local scopeId, hash, flag = parts[2], parts[3], parts[4]
+        if isSelf or not scopeId or not hash then return end
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+        ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+        ballots[hash].abstained = (flag == "1")
+        if ballots[hash].abstained then
+            wipe(ballots[hash].votes)
+        end
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
+    elseif cmd == "GB_HELLO" then
+        local remoteDesigns = tonumber(parts[2]) or 0
+        local remotePollId = parts[3] or "0"
+        local remoteBallots = tonumber(parts[4]) or 0
+        local remoteVersion = parts[5]
+        if isSelf then return end
+        if remoteVersion and not versionNotified and CompareVersions(remoteVersion, GTV.VERSION) then
+            versionNotified = true
+            GTV:Print(string.format(GTV.L.UPDATE_NEWER_FOUND, remoteVersion))
+        end
+        local board = self:GetGuildBoard(false)
+        if not board then return end
+        local localDesigns, vCount, aCount = self:GetBoardStats()
+        local localPollId = (board.timedPoll and board.timedPoll.id) or "0"
+        local shouldReply = (localDesigns > remoteDesigns)
+            or (localPollId ~= "0" and localPollId ~= remotePollId)
+            or ((vCount + aCount) > remoteBallots)
+        if shouldReply then
+            local jitter = GTV:IsGuildLeader() and 0.2 or (0.6 + math.random() * 1.2)
+            C_Timer.After(jitter, function()
+                self:BroadcastGuildBoardSnapshot(board)
+            end)
+        end
+
+    -- ---------------- TIMED POLL MESSAGES ----------------
+    elseif cmd == "TP_META" then
+        local pollId = parts[2]
+        local createdAt = tonumber(parts[3]) or GTV.Storage:Now()
+        local endsAt = tonumber(parts[4]) or (createdAt + 86400)
+        local status = parts[5] or "ACTIVE"
+        local leaderName = parts[6] or senderShort
+        local title = parts[7] or GTV.L.TIMED_TITLE_DEFAULT
+        local keepExisting = (parts[8] ~= "0")
+
+        if isSelf and not isLocalTestEcho then return end
+        if isLocalTestEcho then
+            local rem = GTV.Storage:FormatRemaining(endsAt)
+            if GTV.UI_Prompt then
+                GTV.UI_Prompt:ShowTimedInvite(leaderName, pollId, rem)
+            end
+            return
+        end
+
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        local existing = board.timedPoll
+        if not existing or (createdAt > (existing.createdAt or 0) and existing.id ~= pollId) then
+            if not keepExisting then
+                for _, d in ipairs(board.designs) do
+                    board.deletedIds[d.id] = true
+                end
+                wipe(board.designs)
+                wipe(board.designById)
+            end
+            board.timedPoll = {
+                id = pollId,
+                title = title,
+                leaderName = leaderName,
+                createdAt = createdAt,
+                endsAt = endsAt,
+                status = status,
+                winnerDesignId = nil,
+            }
+            FireCallbacks("GUILD_BOARD_CHANGED", board)
+            if self:IsTimedPollOpen(board.timedPoll) and not GTV.Storage:WasPollPrompted(pollId) then
+                GTV.Storage:MarkPollPrompted(pollId)
+                local rem = GTV.Storage:FormatRemaining(endsAt)
+                if GTV.UI_Prompt then
+                    GTV.UI_Prompt:ShowTimedInvite(leaderName, pollId, rem)
+                end
+            end
+        elseif existing.id == pollId then
+            existing.endsAt = endsAt
+            existing.title = title
+            if status == "CLOSED" then
+                existing.status = "CLOSED"
+            end
+            FireCallbacks("GUILD_BOARD_CHANGED", board)
+        end
+
+    elseif cmd == "TP_CLOSE" then
+        local pollId, winnerId = parts[2], parts[3]
+        if isSelf then return end
+        local board = self:GetGuildBoard(false)
+        if not board or not board.timedPoll or board.timedPoll.id ~= pollId then return end
+        board.timedPoll.status = "CLOSED"
+        if winnerId and winnerId ~= "" then
+            board.timedPoll.winnerDesignId = winnerId
+        end
+        GTV:Print(GTV.L.TIMED_ENDED_CHAT)
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
     -- ---------------- LIVE SESSION MESSAGES ----------------
-    if cmd == "OPEN" then
+    elseif cmd == "OPEN" then
         local sid = parts[2]
         local leaderName = parts[3] or senderShort
         local autoReset = (parts[4] == "1")
         local design = ParseDesign(parts[5], parts[6], parts[7], parts[8], parts[9], parts[10])
-
-        if isSelf and not isLocalTestEcho then
-            return
-        end
+        if isSelf and not isLocalTestEcho then return end
         if isLocalTestEcho then
             if GTV.UI_Prompt then
                 GTV.UI_Prompt:ShowInvite(leaderName, sid)
@@ -1128,185 +1214,20 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
         self.session.myVote = nil
         FireCallbacks("VOTES_RESET", self.session, true)
 
-    elseif cmd == "SUGG" then
-        local sid = parts[2]
-        local suggId = parts[3]
-        local authorDisplay = (parts[4] and parts[4] ~= "") and parts[4] or senderShort
-        local design = ParseDesign(parts[5], parts[6], parts[7], parts[8], parts[9], parts[10])
-        local note = parts[11] or ""
-        if isSelf or not self.session or self.session.id ~= sid then return end
-        if self:AddSuggestionLocal(suggId, authorDisplay, design, note) then
-            GTV:PlaySound("IG_QUEST_LIST_OPEN", 844)
-            GTV:Print(string.format(GTV.L.SUGG_RECEIVED, authorDisplay))
-        end
-
-    elseif cmd == "SVOTE" then
-        local sid, suggId, hash, vote = parts[2], parts[3], parts[4], parts[5]
-        if isSelf or not self.session or self.session.id ~= sid or not hash then return end
-        local sugg = self.session.suggestionById[suggId]
-        if not sugg then return end
-        sugg.votes[hash] = (vote == "UP" or vote == "DOWN") and vote or nil
-        FireCallbacks("SUGGESTIONS_CHANGED", self.session)
-
     elseif cmd == "SYNC_REQ" then
         if not self:IsLeading() or isSelf then return end
         local now = GetTime and GetTime() or 0
         if (now - self.lastSyncReplyAt) < 1.5 then return end
         self.lastSyncReplyAt = now
         local s = self.session
-        local msg = table.concat({
+        self:SendGuild(table.concat({
             "SYNC_STATE",
             s.id,
             SanitizeText(s.leaderName, 24),
             tostring(s.rev),
             s.autoReset and "1" or "0",
             SerializeDesign(s.design),
-        }, "|")
-        self:SendGuild(msg)
-        for i, sugg in ipairs(s.suggestions) do
-            C_Timer.After(i * 0.2, function()
-                if self:IsLeading() and self.session.id == s.id then
-                    self:SendGuild(table.concat({
-                        "SUGG",
-                        s.id,
-                        sugg.id,
-                        SanitizeText(sugg.authorName, 24),
-                        SerializeDesign(sugg.design),
-                        SanitizeText(sugg.note, 36),
-                    }, "|"))
-                end
-            end)
-        end
-
-    -- ---------------- TIMED MULTI-DAY POLL MESSAGES ----------------
-    elseif cmd == "TP_META" then
-        local pollId = parts[2]
-        local createdAt = tonumber(parts[3]) or GTV.Storage:Now()
-        local endsAt = tonumber(parts[4]) or (createdAt + 86400)
-        local status = parts[5] or "ACTIVE"
-        local leaderName = parts[6] or senderShort
-        local title = parts[7] or GTV.L.TIMED_TITLE_DEFAULT
-
-        if isSelf and not isLocalTestEcho then return end
-        if isLocalTestEcho then
-            -- In solo test mode, show the timed poll invite popup!
-            local rem = GTV.Storage:FormatRemaining(endsAt)
-            if GTV.UI_Prompt then
-                GTV.UI_Prompt:ShowTimedInvite(leaderName, pollId, rem)
-            end
-            return
-        end
-
-        local gKey = GTV.Storage:GetGuildKey(false)
-        if not gKey then return end
-        local existing = EnsureTimedPollIndexes(GTV.Storage:GetTimedPoll(gKey))
-        if not existing or (createdAt > (existing.createdAt or 0) and existing.id ~= pollId) then
-            local poll = EnsureTimedPollIndexes({
-                id = pollId,
-                title = title,
-                leaderName = leaderName,
-                createdAt = createdAt,
-                endsAt = endsAt,
-                status = status,
-                designs = {},
-                ballots = {},
-            })
-            GTV.Storage:SetTimedPoll(gKey, poll)
-            FireCallbacks("TIMED_POLL_CHANGED", poll)
-            if self:IsTimedPollOpen(poll) and not GTV.Storage:WasPollPrompted(poll.id) then
-                GTV.Storage:MarkPollPrompted(poll.id)
-                local rem = GTV.Storage:FormatRemaining(poll.endsAt)
-                if GTV.UI_Prompt then
-                    GTV.UI_Prompt:ShowTimedInvite(poll.leaderName, poll.id, rem)
-                end
-            end
-        elseif existing.id == pollId then
-            existing.endsAt = endsAt
-            existing.title = title
-            if status == "CLOSED" then
-                existing.status = "CLOSED"
-            end
-            GTV.Storage:SetTimedPoll(gKey, existing)
-            FireCallbacks("TIMED_POLL_CHANGED", existing)
-        end
-
-    elseif cmd == "TP_DESIGN" then
-        local pollId = parts[2]
-        local designId = parts[3]
-        local authorName = (parts[4] and parts[4] ~= "") and parts[4] or senderShort
-        local createdAt = tonumber(parts[5]) or GTV.Storage:Now()
-        local design = ParseDesign(parts[6], parts[7], parts[8], parts[9], parts[10], parts[11])
-        local note = parts[12] or ""
-        if isSelf then return end
-
-        local poll = self:GetActiveTimedPoll()
-        if not poll or poll.id ~= pollId then return end
-        if self:AddTimedDesignLocal(poll, designId, authorName, createdAt, design, note) then
-            GTV:Print(string.format(GTV.L.SUGG_RECEIVED, authorName))
-        end
-
-    elseif cmd == "TP_VOTE" then
-        local pollId, hash, designId, vote = parts[2], parts[3], parts[4], parts[5]
-        if isSelf or not hash or not designId then return end
-        local poll = self:GetActiveTimedPoll()
-        if not poll or poll.id ~= pollId then return end
-        EnsureTimedPollIndexes(poll)
-        poll.ballots[hash] = poll.ballots[hash] or { abstained = false, votes = {} }
-        poll.ballots[hash].abstained = false
-        poll.ballots[hash].votes[designId] = (vote == "UP" or vote == "DOWN") and vote or nil
-        local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-        if gKey then GTV.Storage:SetTimedPoll(gKey, poll) end
-        FireCallbacks("TIMED_POLL_CHANGED", poll)
-
-    elseif cmd == "TP_ABSTAIN" then
-        local pollId, hash, flag = parts[2], parts[3], parts[4]
-        if isSelf or not hash then return end
-        local poll = self:GetActiveTimedPoll()
-        if not poll or poll.id ~= pollId then return end
-        EnsureTimedPollIndexes(poll)
-        poll.ballots[hash] = poll.ballots[hash] or { abstained = false, votes = {} }
-        poll.ballots[hash].abstained = (flag == "1")
-        if poll.ballots[hash].abstained then
-            wipe(poll.ballots[hash].votes)
-        end
-        local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-        if gKey then GTV.Storage:SetTimedPoll(gKey, poll) end
-        FireCallbacks("TIMED_POLL_CHANGED", poll)
-
-    elseif cmd == "TP_CLOSE" then
-        local pollId, winnerId = parts[2], parts[3]
-        if isSelf then return end
-        local poll = self:GetActiveTimedPoll()
-        if not poll or poll.id ~= pollId then return end
-        poll.status = "CLOSED"
-        if winnerId and winnerId ~= "" then
-            poll.winnerDesignId = winnerId
-        end
-        local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
-        if gKey then GTV.Storage:SetTimedPoll(gKey, poll) end
-        GTV:Print(GTV.L.TIMED_ENDED_CHAT)
-        FireCallbacks("TIMED_POLL_CHANGED", poll)
-
-    elseif cmd == "TP_HELLO" then
-        local remotePollId = parts[2] or "0"
-        local remoteDesigns = tonumber(parts[3]) or 0
-        local remoteVotes = tonumber(parts[4]) or 0
-        if isSelf then return end
-
-        local poll = self:GetActiveTimedPoll()
-        if not poll then return end
-        local localDesigns, localV, localA = self:GetTimedPollStats(poll)
-        local localVotes = localV + localA
-
-        -- Reply if we have a poll they don't, or more designs/votes than they have
-        local shouldReply = (remotePollId ~= poll.id) or (localDesigns > remoteDesigns) or (localVotes > remoteVotes)
-        if shouldReply then
-            -- Guild Master replies fast; other peers jitter slightly so only 1 responds
-            local jitter = GTV:IsGuildLeader() and 0.25 or (0.8 + math.random() * 1.2)
-            C_Timer.After(jitter, function()
-                self:BroadcastTimedPollSnapshot(poll)
-            end)
-        end
+        }, "|"))
     end
 end
 

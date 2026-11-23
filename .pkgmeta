@@ -13,4 +13,5 @@ ignore:
   - build-curseforge-zip.ps1
   - install-to-wow-forever.ps1
   - install-to-wow-forever.bat
+  - update.ps1
   - CHANGELOG.md

@@ -6,7 +6,7 @@ GTV.Storage = Storage
 function Storage:Init()
     GuildTabardVoteDB = GuildTabardVoteDB or {}
     GuildTabardVoteDB.savedDesigns = GuildTabardVoteDB.savedDesigns or {}
-    GuildTabardVoteDB.timedPolls = GuildTabardVoteDB.timedPolls or {}
+    GuildTabardVoteDB.guildBoards = GuildTabardVoteDB.guildBoards or {}
     GuildTabardVoteDB.voterHashes = GuildTabardVoteDB.voterHashes or {}
     GuildTabardVoteDB.myBallots = GuildTabardVoteDB.myBallots or {}
     GuildTabardVoteDB.promptedPolls = GuildTabardVoteDB.promptedPolls or {}
@@ -24,8 +24,8 @@ function Storage:GetGuildKey(isTestMode)
     if isTestMode then
         return "__TEST_GUILD__"
     end
-    local guildName = IsInGuild and IsInGuild() and GetGuildInfo("player") or nil
-    if not guildName or guildName == "" then
+    local guildName = GTV:GetGuildName()
+    if not guildName then
         return nil
     end
     local realm = (GetNormalizedRealmName and GetNormalizedRealmName()) or (GetRealmName and GetRealmName()) or ""
@@ -33,8 +33,8 @@ function Storage:GetGuildKey(isTestMode)
     return guildName .. "-" .. realm
 end
 
--- Generates a persistent random anonymous token per poll/session so votes cannot be traced
--- to a character name while still preventing double-voting!
+-- Generates a persistent random anonymous token per scope so votes cannot be traced
+-- to a character name while still preventing double-voting.
 function Storage:GetVoterHash(scopeId)
     self:Init()
     scopeId = tostring(scopeId or "default")
@@ -54,7 +54,7 @@ function Storage:GetVoterHash(scopeId)
 end
 
 -- =========================================================================
--- SAVED DESIGNS (Account-wide library, loadable & submittable anytime)
+-- SAVED DESIGNS (Account-wide personal library, always available!)
 -- =========================================================================
 function Storage:GetSavedDesigns()
     self:Init()
@@ -107,36 +107,63 @@ function Storage:DeleteSavedDesign(id)
 end
 
 -- =========================================================================
--- TIMED MULTI-DAY POLLS PERSISTENCE
+-- UNIFIED PERSISTENT GUILD DESIGN BOARD (Designs + Anonymous Votes + Timed Poll)
 -- =========================================================================
-function Storage:GetTimedPoll(guildKey)
+function Storage:GetGuildBoard(guildKey, createIfMissing)
     self:Init()
     if not guildKey then
         return nil
     end
-    return GTV.db.timedPolls[guildKey]
+    local board = GTV.db.guildBoards[guildKey]
+    if not board then
+        if not createIfMissing then
+            return nil
+        end
+        board = {
+            guildKey = guildKey,
+            designs = {},    -- array of { id, authorName, authorKey, note, design, createdAt }
+            deletedIds = {}, -- tombstone map { [designId] = true }
+            ballots = {},    -- [scopeId] = { [voterHash] = { abstained = bool, votes = { [designId] = "UP"|"DOWN" } } }
+            timedPoll = nil, -- nil or { id, title, leaderName, createdAt, endsAt, status, winnerDesignId }
+        }
+        GTV.db.guildBoards[guildKey] = board
+    end
+    board.designs = board.designs or {}
+    board.deletedIds = board.deletedIds or {}
+    board.ballots = board.ballots or {}
+    board.designById = {}
+    for _, d in ipairs(board.designs) do
+        board.designById[d.id] = d
+    end
+    return board
 end
 
-function Storage:SetTimedPoll(guildKey, poll)
-    self:Init()
-    if not guildKey then
-        return
+function Storage:GetBoardScopeId(board)
+    if board and board.timedPoll and board.timedPoll.id then
+        return board.timedPoll.id
     end
-    GTV.db.timedPolls[guildKey] = poll
+    return (board and board.guildKey or "default") .. "_board"
 end
 
-function Storage:GetMyBallot(pollId)
-    self:Init()
-    if not pollId then
-        return nil
+function Storage:GetBallotMap(board, scopeId)
+    if not board then
+        return {}
     end
-    if not GTV.db.myBallots[pollId] then
-        GTV.db.myBallots[pollId] = {
+    scopeId = scopeId or self:GetBoardScopeId(board)
+    board.ballots[scopeId] = board.ballots[scopeId] or {}
+    return board.ballots[scopeId]
+end
+
+function Storage:GetMyBallot(scopeId)
+    self:Init()
+    scopeId = tostring(scopeId or "default")
+    if not GTV.db.myBallots[scopeId] then
+        GTV.db.myBallots[scopeId] = {
             abstained = false,
             votes = {}, -- [designId] = "UP" | "DOWN"
         }
     end
-    return GTV.db.myBallots[pollId]
+    return GTV.db.myBallots[scopeId]
 end
 
 function Storage:WasPollPrompted(pollId)

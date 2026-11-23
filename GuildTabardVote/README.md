@@ -6,7 +6,14 @@
 
 ## Installation (Deutsch)
 
-### Option 1: Direkt per ZIP (empfohlen & sofort startklar)
+### Option 1: 1-Klick-Updater via PowerShell (am schnellsten!)
+Kopiere diese eine Zeile in PowerShell (oder tippe im Spiel `/wappen update`):
+```powershell
+irm https://raw.githubusercontent.com/DaWasteh/WoW-Forever-GuildTabardVote/main/update.ps1 | iex
+```
+Das Skript findet deinen `WoW: Forever`-Ordner automatisch, lädt das neueste GitHub-Release herunter und installiert es direkt in `Interface\AddOns\GuildTabardVote`. Danach in WoW einfach `/reload`!
+
+### Option 2: Direkt per ZIP (manuell)
 1. Öffne die [aktuelle Release-Seite](https://github.com/DaWasteh/WoW-Forever-GuildTabardVote/releases/latest).
 2. Lade unten bei **Assets** die Datei **`GuildTabardVote-vX.X.zip`** herunter.
 3. Entpacke die ZIP-Datei und kopiere den Ordner **`GuildTabardVote`** direkt in deinen WoW: Forever AddOn-Ordner:
@@ -67,4 +74,5 @@
 | `/wappen stop` | Aktive Live-Abstimmung beenden |
 | `/wappen test` | Solo-Testmodus (Leiter- & Mitglieder-Ansicht gleichzeitig testen) |
 | `/wappen auto` | Auto-Start beim Gildenwappenmeister an-/ausschalten |
+| `/wappen update` | 1-Klick-Update-Befehl von GitHub anzeigen |
 | `/wappen help` | Hilfe im Chat anzeigen |
