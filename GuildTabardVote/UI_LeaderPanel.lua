@@ -152,6 +152,20 @@ local function EnsurePanel()
         f:Hide()
     end)
 
+    local gmFullBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    gmFullBtn:SetSize(88, 20)
+    gmFullBtn:SetPoint("RIGHT", closeBtn, "LEFT", -4, 0)
+    gmFullBtn:SetText(GTV.L.GM_MENU_BIG_BTN)
+    if gmFullBtn.GetFontString and gmFullBtn:GetFontString() then
+        gmFullBtn:GetFontString():SetTextColor(1.0, 0.88, 0.35)
+    end
+    gmFullBtn:SetScript("OnClick", function()
+        GTV:PlaySound("IG_MAINMENU_OPEN", 850)
+        if GTV.UI_GMMenu then
+            GTV.UI_GMMenu:Open()
+        end
+    end)
+
     local elapsedAcc = 0
     f:SetScript("OnUpdate", function(_, elapsed)
         elapsedAcc = elapsedAcc + elapsed
@@ -991,9 +1005,9 @@ function UI_LeaderPanel:ShowStandalone(isTestMode)
 
     C_Timer.After(0.05, function()
         if not f:IsShown() then return end
-        f.standaloneModel:EnsureReady()
-        if not GTV.Protocol:IsLeading() or isTestMode then
-            GTV.Protocol:StartLeaderSession(f.standaloneModel, true, isTestMode and true or false)
+        f.standaloneModel:EnsureReady(false)
+        if isTestMode then
+            GTV.Protocol:StartLeaderSession(f.standaloneModel, true, true)
         end
         self:Refresh()
     end)

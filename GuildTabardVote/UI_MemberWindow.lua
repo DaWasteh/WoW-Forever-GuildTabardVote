@@ -289,7 +289,21 @@ local function EnsureWindow()
     local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
     closeBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -3, -3)
 
-    -- Guild Master quick shortcut button to Leader Panel
+    -- Guild Master dedicated GM Results Menu button + Leader Panel shortcut in top bar!
+    local gmMenuBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    gmMenuBtn:SetSize(136, 26)
+    gmMenuBtn:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -48)
+    gmMenuBtn:SetText(GTV.L.TAB_GM_MENU)
+    ColorBtnText(gmMenuBtn, 1.0, 0.86, 0.25)
+    gmMenuBtn:SetScript("OnClick", function()
+        GTV:PlaySound("IG_MAINMENU_OPEN", 850)
+        if GTV.UI_GMMenu then
+            GTV.UI_GMMenu:Open()
+        end
+    end)
+    gmMenuBtn:Hide()
+    f.gmMenuBtn = gmMenuBtn
+
     local leaderPanelBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
     leaderPanelBtn:SetSize(108, 22)
     leaderPanelBtn:SetPoint("RIGHT", closeBtn, "LEFT", -6, 0)
@@ -1079,7 +1093,13 @@ function UI_MemberWindow:Refresh()
 
     win.tabSavedBtn:SetText(string.format(GTV.L.TAB_SAVED, savedCount))
     win.tabTimedBtn:SetText(timedOpen and GTV.L.TAB_TIMED_ACTIVE or GTV.L.TAB_TIMED)
-    win.leaderPanelBtn:SetShown(GTV:IsGuildLeader() or GTV.Protocol:IsTestModeActive())
+    local isGMOrTest = GTV:IsGuildLeader() or GTV.Protocol:IsTestModeActive()
+    win.leaderPanelBtn:SetShown(isGMOrTest)
+    win.gmMenuBtn:SetShown(isGMOrTest)
+    if isGMOrTest then
+        local _, voters = GTV.Protocol:GetBoardStats()
+        win.gmMenuBtn:SetText(GTV.L.TAB_GM_MENU .. " (" .. tostring(voters) .. ")")
+    end
 
     if s and s.isTestMode then
         win.statusText:SetText(GTV.L.STATUS_TEST)
@@ -1168,6 +1188,15 @@ end
 
 function UI_MemberWindow:OpenLive()
     self:OpenTab("LIVE")
+end
+
+function UI_MemberWindow:OpenAndPreviewDesign(entry)
+    local f = EnsureWindow()
+    f:Show()
+    SetActiveTab("LIVE")
+    if entry then
+        SelectGuildDesign(entry)
+    end
 end
 
 function UI_MemberWindow:IsShown()

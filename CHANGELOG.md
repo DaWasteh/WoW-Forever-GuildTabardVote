@@ -1,27 +1,27 @@
 # Changelog
 
+## v0.4 (2026-11-23)
+
+### Dedicated Guild Master Results Menu & Reliable Throttled Sync
+- **New Dedicated Guild Master Zusatzmenü (`UI_GMMenu.lua` — „GM-Auswertung“):**
+  - Prominent gold **„GM-Auswertung (N)“** button right in the top bar of `/wappen` (and `/wappen gm` slash command, plus **„Auswertung“** button in the Leader Panel), visible **strictly to the Guild Master** (and in `/wappen test`).
+  - Opens a full-size ranked anonymous leaderboard of ALL submitted guild designs (`#1`, `#2`, `#3`...) with 2D thumbnails, big green/red split vote bars per design, clear `Hoch / Runter / Score / Gesamt` counts, overall KPI strip (`Designs / Wähler / Enthalten`), **„3D ansehen“**, **„Übernehmen“**, **„Merken“**, **„Stimmen leeren“**, and **„Sieger melden“**.
+  - When the Guild Master runs `/wappen` and designs already exist, the dedicated GM Results overview opens automatically alongside the main window.
+- **Fixed Dropped Votes Under WoW Addon Message Throttling (`Protocol.lua`):**
+  - Replaced unthrottled fire-and-forget `C_ChatInfo.SendAddonMessage` bursts (which silently dropped `GB_BALLOT` votes when Blizzard returned `AddonMessageThrottle` / `ChannelThrottle`!) with a **reliable priority send queue** that checks `SendAddonMessageResult` and automatically retries throttled messages with backoff.
+  - Prioritized sending anonymous ballots (`GB_BALLOT`) BEFORE deletion tombstones (`GB_DEL`) during snapshots.
+  - Added 1-click **„Stimmen abrufen“ (`GB_SYNC_REQ`)** button in the GM Results menu so the Guild Master can immediately pull every online guild member's anonymous ballot (1 tiny packet per member) with a live response counter!
+- **Stopped Accidental Live Invite Spam:** Opening the standalone Leader Panel no longer auto-broadcasts a Live Session invite until the GM actually clicks **„Live starten“**.
+- **Diagnostics Command (`/wappen status`):** Prints addon version, guild name, rank, `IsGuildLeader` detection, registered prefix, active scope, design/voter counts, and send queue length for instant troubleshooting.
+
 ## v0.3 (2026-11-23)
 
-### Guild Master Vote Visibility & Edge-Case Bugfixes
-- **Fixed Guild Master Missing Vote Counts per Design (Cross-Realm & Scope Fix):**
-  - Replaced realm-specific `"<Guild-Realm>_board"` scope IDs with a canonical cross-realm-safe `"BOARD"` scope (with automatic migration of legacy v0.2 votes), fixing cases where connected-realm members' votes were stored under a different scope than the Guild Master's.
-  - Carrying over existing board votes automatically when the Guild Master starts a Timed Poll with *"Bisherige Gilden-Designs behalten"* checked (and mirroring in-flight `"BOARD"` votes cleanly).
-  - Hardened `GTV:IsGuildLeader()` with `C_GuildInfo.GuildRoster()` and `C_GuildInfo.GetGuildRankOrder` fallback so GM detection works reliably right after login.
-- **Crystal-Clear Anonymous GM Vote Display:**
-  - Every design row now shows a clear anonymous GM vote badge (`+Up / -Down (Total)`) with hover tooltip in BOTH the **Leader Panel** and the **Member Window** (strictly hidden from regular members!).
-  - Added an anonymous GM summary header (`GM (anonym): Wähler: X | Enthalten: Y`) above the Guild Designs list for the Guild Master.
-- **Checksum-Based Peer Sync & Atomic Ballot Replication (`GB_BALLOT`):**
-  - Replaced count-only `GB_HELLO` checks (which missed votes whenever two peers happened to have the same voter count or voted on multiple designs) with a deterministic content checksum over all designs, deletions, and individual votes.
-  - Packed per-voter ballots (`GB_BALLOT` with monotonic revision) now sync vote additions, switches (`UP <-> DOWN`), removals (`NONE`), abstentions, and design deletions (`GB_DEL` tombstones) cleanly across offline/online sessions.
-- **Fixed Lingering Solo Test Mode Edge Case:** Closing `/wappen test` or opening `/wappen` / `/wappen start` / Guild Registrar now cleanly exits test mode so real guild sync and GM vote counts resume immediately without requiring `/reload`.
-- **Fixed Delayed Login Guild Sync:** Guild sync now waits until `GetGuildInfo("player")` is actually populated (`GUILD_ROSTER_UPDATE` / `PLAYER_GUILD_UPDATE`) rather than marking synced prematurely.
+- Cross-realm canonical `"BOARD"` scope, checksum-based peer sync, atomic `GB_BALLOT` replication, and test-mode cleanup.
 
 ## v0.2 (2026-11-23)
 
-- Always-open persistent Guild Design Board so every guild member can submit designs and view all guild designs anytime.
-- Native clickable `Button` widgets for Thumbs Up / Thumbs Down, inline visual toast feedback, and 3D `EnsureReady` tab-switch reset fix.
-- `/wappen update` command + `update.ps1` 1-click GitHub updater + automatic in-game version check.
+- Always-open persistent Guild Design Board, native clickable vote buttons, inline toast feedback, and `/wappen update` + `update.ps1`.
 
 ## v0.1 (2026-11-23)
 
-- Initial release of **GuildTabardVote** for **World of Warcraft: Forever** (`16001`).
+- Initial release for World of Warcraft: Forever (`16001`).

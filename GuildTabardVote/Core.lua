@@ -1,7 +1,7 @@
 local ADDON_NAME, GTV = ...
 
 GTV.ADDON_NAME = ADDON_NAME
-GTV.VERSION = "0.3.0"
+GTV.VERSION = "0.4.0"
 GTV.PREFIX = "GTV1"
 GTV.MEDIA_PATH = "Interface\\AddOns\\GuildTabardVote\\Media\\"
 
@@ -326,11 +326,42 @@ local function HandleSlashCommand(msg)
     if cmd == "help" or cmd == "?" then
         GTV:Print(GTV.L.HELP_HEADER)
         GTV:Print(GTV.L.HELP_OPEN)
+        GTV:Print(GTV.L.HELP_GM)
         GTV:Print(GTV.L.HELP_START)
         GTV:Print(GTV.L.HELP_STOP)
         GTV:Print(GTV.L.HELP_TEST)
         GTV:Print(GTV.L.HELP_AUTO)
         GTV:Print(GTV.L.HELP_UPDATE)
+        GTV:Print(GTV.L.HELP_STATUS)
+        return
+    end
+
+    if cmd == "status" or cmd == "diag" or cmd == "debug" then
+        local gName, rName, rIdx = nil, nil, nil
+        if IsInGuild and IsInGuild() and GetGuildInfo then
+            gName, rName, rIdx = GetGuildInfo("player")
+        end
+        local prefixOk = C_ChatInfo and C_ChatInfo.IsAddonMessagePrefixRegistered and C_ChatInfo.IsAddonMessagePrefixRegistered(GTV.PREFIX)
+        local dCount, voters, abstained = GTV.Protocol:GetBoardStats()
+        local board = GTV.Protocol:GetGuildBoard(false)
+        local scopeId = board and GTV.Storage:GetBoardScopeId(board) or "-"
+        GTV:Print(string.format("v%s | Gilde: %s | Rang: %s (%s) | IsGuildLeader: %s | TestMode: %s",
+            GTV.VERSION, tostring(gName or "keine"), tostring(rName or "-"), tostring(rIdx),
+            tostring(GTV:IsGuildLeader()), tostring(GTV.Protocol:IsTestModeActive())))
+        GTV:Print(string.format("Prefix %s: %s | Scope: %s | Designs: %d | Wähler: %d | Enthalten: %d | Queue: %d",
+            GTV.PREFIX, tostring(prefixOk), tostring(scopeId), dCount, voters, abstained,
+            GTV.Protocol:GetQueueLength()))
+        return
+    end
+
+    if cmd == "gm" or cmd == "auswertung" or cmd == "results" then
+        if not GTV:CanSeeLeaderVotes() then
+            GTV:Print(GTV.L.GM_ONLY_ERROR)
+            return
+        end
+        if GTV.UI_GMMenu then
+            GTV.UI_GMMenu:Open()
+        end
         return
     end
 
@@ -397,6 +428,15 @@ local function HandleSlashCommand(msg)
     if GTV.Protocol:HasActiveSession() then
         GTV.Protocol:SendParticipation("JOIN")
         GTV.UI_MemberWindow:OpenTab("LIVE")
+        return
+    end
+
+    -- Guild Master opens directly into the dedicated GM Results overview if designs already exist
+    if GTV:IsGuildLeader() and #GTV.Protocol:GetGuildDesigns() > 0 then
+        GTV.UI_MemberWindow:OpenTab("DESIGN")
+        if GTV.UI_GMMenu then
+            GTV.UI_GMMenu:Open()
+        end
         return
     end
 
@@ -478,7 +518,15 @@ bootFrame:SetScript("OnEvent", function(_, event, arg1)
         end)
         C_Timer.After(3.5, TrySyncGuildIfReady)
     elseif event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
-        C_Timer.After(0.5, TrySyncGuildIfReady)
+        C_Timer.After(0.5, function()
+            TrySyncGuildIfReady()
+            if GTV.UI_MemberWindow and GTV.UI_MemberWindow:IsShown() then
+                GTV.UI_MemberWindow:Refresh()
+            end
+            if GTV.UI_GMMenu and GTV.UI_GMMenu:IsShown() then
+                GTV.UI_GMMenu:Refresh()
+            end
+        end)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if GTV.UI_Prompt and GTV.UI_Prompt.ShowDeferredIfNeeded then
             GTV.UI_Prompt:ShowDeferredIfNeeded()

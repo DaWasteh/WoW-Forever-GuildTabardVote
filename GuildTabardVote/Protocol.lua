@@ -18,6 +18,59 @@ Protocol.testModeActive = false
 local listeners = {}
 local versionNotified = false
 
+-- Reliable priority send queue with automatic retry on Blizzard AddonMessageThrottle / ChannelThrottle!
+local sendQueue = {}
+local sendTimerActive = false
+local SEND_PACE_NORMAL = 0.28
+local SEND_PACE_RETRY = 0.65
+local MAX_SEND_RETRIES = 6
+
+local function IsThrottleResult(res)
+    if res == false then
+        return true
+    end
+    if type(res) == "number" then
+        -- Enum.SendAddonMessageResult: 0 = Success, 3 = AddonMessageThrottle, 9 = ChannelThrottle
+        if res == 3 or res == 9 then
+            return true
+        end
+    end
+    return false
+end
+
+local function PumpSendQueue()
+    sendTimerActive = false
+    if #sendQueue == 0 then
+        return
+    end
+    if not IsInGuild or not IsInGuild() then
+        wipe(sendQueue)
+        return
+    end
+
+    local item = table.remove(sendQueue, 1)
+    local ok, res = pcall(C_ChatInfo.SendAddonMessage, GTV.PREFIX, item.payload, "GUILD")
+    if (not ok or IsThrottleResult(res)) and item.retries < MAX_SEND_RETRIES then
+        item.retries = item.retries + 1
+        table.insert(sendQueue, 1, item)
+        sendTimerActive = true
+        C_Timer.After(SEND_PACE_RETRY, PumpSendQueue)
+        return
+    end
+
+    if #sendQueue > 0 then
+        sendTimerActive = true
+        C_Timer.After(SEND_PACE_NORMAL, PumpSendQueue)
+    end
+end
+
+function Protocol:GetQueueLength()
+    return #sendQueue
+end
+
+Protocol.syncResponseCount = 0
+Protocol.syncResponders = {}
+
 function Protocol:RegisterCallback(fn)
     table.insert(listeners, fn)
 end
@@ -217,7 +270,7 @@ function Protocol:ExitTestMode()
     FireCallbacks("GUILD_BOARD_CHANGED", self:GetGuildBoard(false))
 end
 
-function Protocol:SendGuild(payload)
+function Protocol:SendGuild(payload, highPriority)
     if not payload or payload == "" then
         return
     end
@@ -232,8 +285,38 @@ function Protocol:SendGuild(payload)
     if not IsInGuild or not IsInGuild() then
         return
     end
-    if C_ChatInfo and C_ChatInfo.SendAddonMessage then
-        pcall(C_ChatInfo.SendAddonMessage, GTV.PREFIX, payload, "GUILD")
+    if not (C_ChatInfo and C_ChatInfo.SendAddonMessage) then
+        return
+    end
+
+    -- Immediate fast-path if queue is empty and highPriority (or direct click)
+    if #sendQueue == 0 and not sendTimerActive and highPriority ~= false then
+        local ok, res = pcall(C_ChatInfo.SendAddonMessage, GTV.PREFIX, payload, "GUILD")
+        if ok and not IsThrottleResult(res) then
+            return
+        end
+        table.insert(sendQueue, 1, { payload = payload, retries = 1 })
+        sendTimerActive = true
+        C_Timer.After(SEND_PACE_RETRY, PumpSendQueue)
+        return
+    end
+
+    -- Deduplicate identical queued payloads
+    for _, existing in ipairs(sendQueue) do
+        if existing.payload == payload then
+            return
+        end
+    end
+
+    local entry = { payload = payload, retries = 0 }
+    if highPriority then
+        table.insert(sendQueue, 1, entry)
+    else
+        table.insert(sendQueue, entry)
+    end
+    if not sendTimerActive then
+        sendTimerActive = true
+        C_Timer.After(0.05, PumpSendQueue)
     end
 end
 
@@ -380,7 +463,13 @@ function Protocol:AddGuildDesignLocal(board, designId, authorName, authorKey, cr
         note = note or "",
         design = GTV.TabardSync:CopyDesign(design),
     }
-    table.insert(board.designs, 1, entry)
+    table.insert(board.designs, entry)
+    table.sort(board.designs, function(a, b)
+        if (a.createdAt or 0) ~= (b.createdAt or 0) then
+            return (a.createdAt or 0) > (b.createdAt or 0)
+        end
+        return tostring(a.id) > tostring(b.id)
+    end)
     board.designById[designId] = entry
     FireCallbacks("GUILD_BOARD_CHANGED", board, entry)
     return true
@@ -751,7 +840,42 @@ function Protocol:SendGuildBoardHello()
     end
     local board = self:GetGuildBoard(true)
     local sig = ComputeBoardSignature(board)
-    self:SendGuild(table.concat({ "GB_HELLO", sig, GTV.VERSION }, "|"))
+    self:SendGuild(table.concat({ "GB_HELLO", sig, GTV.VERSION }, "|"), true)
+end
+
+-- GM actively requests every online guild member to send their ballot + any missing designs immediately!
+function Protocol:RequestGuildVoteSync()
+    if not self:IsTestModeActive() and not (IsInGuild and IsInGuild()) then
+        return
+    end
+    self.syncResponseCount = 0
+    wipe(self.syncResponders)
+    local board = self:GetGuildBoard(true)
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local sig = ComputeBoardSignature(board)
+    self:SendGuild(table.concat({ "GB_SYNC_REQ", scopeId, sig, GTV.VERSION }, "|"), true)
+    FireCallbacks("SYNC_STATUS_CHANGED")
+end
+
+-- GM resets all anonymous votes on the current Guild Board scope
+function Protocol:ResetBoardVotes()
+    if not self:IsTestModeActive() and not GTV:IsGuildLeader() then
+        return false
+    end
+    local board = self:GetGuildBoard(false)
+    if not board then
+        return false
+    end
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    board.ballots[scopeId] = {}
+    local myBallot = self:GetMyCurrentBallot(board)
+    myBallot.abstained = false
+    wipe(myBallot.votes)
+    myBallot.rev = math.max((myBallot.rev or 0) + 1, GTV.Storage:Now())
+    self:SendGuild(table.concat({ "GB_RESET_VOTES", scopeId, tostring(myBallot.rev) }, "|"), true)
+    GTV:Print(GTV.L.GM_MENU_RESET_DONE)
+    FireCallbacks("GUILD_BOARD_CHANGED", board)
+    return true
 end
 
 function Protocol:BroadcastGuildBoardSnapshot(board)
@@ -764,7 +888,7 @@ function Protocol:BroadcastGuildBoardSnapshot(board)
     end
     self.lastBoardSyncReplyAt = now
 
-    local delay = 0.05
+    -- Queue via reliable throttled queue: Poll Meta -> Designs -> VOTES FIRST -> Tombstones last!
     if board.timedPoll then
         local p = board.timedPoll
         self:SendGuild(table.concat({
@@ -776,53 +900,47 @@ function Protocol:BroadcastGuildBoardSnapshot(board)
             SanitizeText(p.leaderName, 24),
             SanitizeText(p.title, 34),
             p.keepExisting == false and "0" or "1",
-        }, "|"))
-        delay = delay + 0.14
+        }, "|"), false)
     end
 
     for _, d in ipairs(board.designs) do
-        local entry = d
-        C_Timer.After(delay, function()
-            self:SendGuild(table.concat({
-                "GB_ADD",
-                entry.id,
-                SanitizeText(entry.authorName, 24),
-                tostring(entry.createdAt or 0),
-                SerializeDesign(entry.design),
-                SanitizeText(entry.note, 34),
-            }, "|"))
-        end)
-        delay = delay + 0.12
+        self:SendGuild(table.concat({
+            "GB_ADD",
+            d.id,
+            SanitizeText(d.authorName, 24),
+            tostring(d.createdAt or 0),
+            SerializeDesign(d.design),
+            SanitizeText(d.note, 34),
+        }, "|"), false)
     end
 
-    -- Sync deletions (tombstones, capped to last 20 to avoid spam)
+    -- Send all anonymous ballots BEFORE tombstones so votes are NEVER starved!
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+    for hash, b in pairs(ballots) do
+        local rev = tonumber(b.rev) or GTV.Storage:Now()
+        if b.abstained then
+            self:SendGuild(table.concat({ "GB_BALLOT", scopeId, hash, tostring(rev), "1", "" }, "|"), false)
+        else
+            local chunks = EncodeBallotVotes(b.votes)
+            self:SendGuild(table.concat({ "GB_BALLOT", scopeId, hash, tostring(rev), "0", chunks[1] or "" }, "|"), false)
+            for i = 2, #chunks do
+                self:SendGuild(table.concat({ "GB_BALLOT_ADD", scopeId, hash, tostring(rev), chunks[i] }, "|"), false)
+            end
+        end
+    end
+
+    -- Sync tombstones last (capped to 20)
     local delSent = 0
     for did in pairs(board.deletedIds) do
         if delSent >= 20 then break end
         delSent = delSent + 1
-        local idToDel = did
-        C_Timer.After(delay, function()
-            self:SendGuild(table.concat({ "GB_DEL", idToDel }, "|"))
-        end)
-        delay = delay + 0.08
-    end
-
-    -- Sync all anonymous ballots in compact 1-packet-per-voter format
-    local scopeId = GTV.Storage:GetBoardScopeId(board)
-    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
-    for hash, b in pairs(ballots) do
-        local h, ballot = hash, b
-        C_Timer.After(delay, function()
-            BroadcastSingleBallot(self, scopeId, h, ballot)
-        end)
-        delay = delay + 0.12
+        self:SendGuild(table.concat({ "GB_DEL", did }, "|"), false)
     end
 
     if board.timedPoll and board.timedPoll.status == "CLOSED" then
         local p = board.timedPoll
-        C_Timer.After(delay, function()
-            self:SendGuild(table.concat({ "TP_CLOSE", p.id, p.winnerDesignId or "" }, "|"))
-        end)
+        self:SendGuild(table.concat({ "TP_CLOSE", p.id, p.winnerDesignId or "" }, "|"), false)
     end
 end
 
@@ -1176,6 +1294,48 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
         local board = self:GetGuildBoard(true)
         if not board then return end
         ApplyIncomingBallot(board, scopeId, hash, rev, abstained, DecodeBallotVotes(encodedVotes), false)
+        if not self.syncResponders[senderKey] then
+            self.syncResponders[senderKey] = true
+            self.syncResponseCount = (self.syncResponseCount or 0) + 1
+        end
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
+    elseif cmd == "GB_SYNC_REQ" then
+        local reqScope = parts[2]
+        local remoteSig = parts[3] or ""
+        local remoteVersion = parts[4]
+        if isSelf then return end
+        if remoteVersion and not versionNotified and CompareVersions(remoteVersion, GTV.VERSION) then
+            versionNotified = true
+            GTV:Print(string.format(GTV.L.UPDATE_NEWER_FOUND, remoteVersion))
+        end
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        -- Immediately send our own anonymous ballot (1 tiny packet!) + any missing designs/ballots!
+        local scopeId = GTV.Storage:NormalizeScopeId(reqScope or GTV.Storage:GetBoardScopeId(board))
+        local myBallot = self:GetMyCurrentBallot(board)
+        local myHash = GetVoterHashForBoard(board, scopeId)
+        if myBallot and (myBallot.abstained or next(myBallot.votes) ~= nil) then
+            C_Timer.After(0.15 + math.random() * 0.5, function()
+                BroadcastSingleBallot(self, scopeId, myHash, myBallot)
+            end)
+        end
+        local localSig = ComputeBoardSignature(board)
+        if remoteSig ~= localSig and (#board.designs > 0 or next(GTV.Storage:GetBallotMap(board)) ~= nil) then
+            C_Timer.After(0.5 + math.random() * 1.0, function()
+                self:BroadcastGuildBoardSnapshot(board)
+            end)
+        end
+
+    elseif cmd == "GB_RESET_VOTES" then
+        local scopeId = GTV.Storage:NormalizeScopeId(parts[2])
+        if isSelf then return end
+        local board = self:GetGuildBoard(false)
+        if not board then return end
+        board.ballots[scopeId] = {}
+        local myBallot = GTV.Storage:GetMyBallot(GTV.Storage:GetMyBallotKey(board, scopeId))
+        myBallot.abstained = false
+        wipe(myBallot.votes)
         FireCallbacks("GUILD_BOARD_CHANGED", board)
 
     elseif cmd == "GB_BALLOT_ADD" then

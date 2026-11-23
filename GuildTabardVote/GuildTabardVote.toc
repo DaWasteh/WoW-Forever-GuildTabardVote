@@ -1,10 +1,10 @@
 ## Interface: 16001, 11509, 20506, 120105
 ## Title: GuildTabardVote
 ## Title-deDE: GuildTabardVote |cffd4af37(Gildenwappen-Abstimmung)|r
-## Notes: Persistent guild tabard design board, live & timed multi-day anonymous voting (GM-only results), real-time 3D/2D sync, and saved designs.
-## Notes-deDE: Gildenweites Wappen-Board, Live- & mehrtägige anonyme Abstimmungen (Auswertung nur für Gildenmeister), Live-3D/2D-Vorschau und Designs speichern/laden.
+## Notes: Persistent guild tabard design board, dedicated Guild Master anonymous results menu, live & timed multi-day voting, real-time 3D/2D sync, and saved designs.
+## Notes-deDE: Gildenweites Wappen-Board, eigenes Gildenmeister-Auswertungsmenü (anonym), Live- & mehrtägige Abstimmungen, Live-3D/2D-Vorschau und Designs speichern/laden.
 ## Author: DaWasteh
-## Version: 0.3.0
+## Version: 0.4.0
 ## IconTexture: Interface\AddOns\GuildTabardVote\Media\icon
 ## Category: Guild
 ## Category-deDE: Gilde
@@ -19,5 +19,6 @@ Storage.lua
 TabardSync.lua
 Protocol.lua
 UI_Prompt.lua
+UI_GMMenu.lua
 UI_LeaderPanel.lua
 UI_MemberWindow.lua

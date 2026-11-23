@@ -69,10 +69,12 @@ Das Skript findet deinen `WoW: Forever`-Ordner automatisch, lädt das neueste Gi
 
 | Befehl / Command | Funktion |
 | --- | --- |
-| `/wappen` (oder `/gwa`, `/gtv`) | Fenster öffnen (Live-Ansicht, Zeit-Wahl, Designer & Gespeicherte Designs) |
+| `/wappen` (oder `/gwa`, `/gtv`) | Fenster öffnen (Gilden-Designs, Zeit-Wahl, Designer & GM-Auswertung) |
+| `/wappen gm` | Eigenes Gildenmeister-Auswertungsmenü (anonymes Ranking & Stimmen-Sync) öffnen |
 | `/wappen start` | Leiter-Panel überall öffnen (Live-Wahl, X-Tage-Zeit-Wahl & Gespeichert) |
 | `/wappen stop` | Aktive Live-Abstimmung beenden |
-| `/wappen test` | Solo-Testmodus (Leiter- & Mitglieder-Ansicht gleichzeitig testen) |
+| `/wappen test` | Solo-Testmodus (Leiter-, GM- & Mitglieder-Ansicht testen) |
 | `/wappen auto` | Auto-Start beim Gildenwappenmeister an-/ausschalten |
 | `/wappen update` | 1-Klick-Update-Befehl von GitHub anzeigen |
+| `/wappen status` | Diagnose (Version, Rang, Sync & Stimmen) im Chat anzeigen |
 | `/wappen help` | Hilfe im Chat anzeigen |
