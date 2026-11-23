@@ -1,0 +1,46 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate AddOn
+        run: python3 scripts/validate.py
+
+      - name: Package CurseForge-ready ZIP
+        run: |
+          cp README.md GuildTabardVote/README.md
+          cp CHANGELOG.md GuildTabardVote/CHANGELOG.md
+          mkdir -p dist
+          zip -r "dist/GuildTabardVote-${GITHUB_REF_NAME}.zip" GuildTabardVote
+          unzip -l "dist/GuildTabardVote-${GITHUB_REF_NAME}.zip"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ZIP_FILE="dist/GuildTabardVote-${TAG}.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP_FILE" --clobber
+          else
+            gh release create "$TAG" "$ZIP_FILE" \
+              --title "GuildTabardVote ${TAG}" \
+              --notes-file CHANGELOG.md
+          fi

@@ -1,0 +1,16 @@
+package-as: GuildTabardVote
+enable-nolib-creation: no
+
+move-folders:
+  GuildTabardVote/GuildTabardVote: GuildTabardVote
+
+ignore:
+  - .git
+  - .github
+  - .gitignore
+  - dist
+  - scripts
+  - build-curseforge-zip.ps1
+  - install-to-wow-forever.ps1
+  - install-to-wow-forever.bat
+  - CHANGELOG.md

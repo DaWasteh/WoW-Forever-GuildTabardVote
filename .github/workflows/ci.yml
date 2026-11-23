@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-and-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate Lua, TOC, Localization, and TGA assets
+        run: python3 scripts/validate.py
+
+      - name: Test CurseForge ZIP packaging
+        run: |
+          cp README.md GuildTabardVote/README.md
+          cp CHANGELOG.md GuildTabardVote/CHANGELOG.md
+          mkdir -p dist
+          zip -r dist/GuildTabardVote-ci.zip GuildTabardVote
+          unzip -l dist/GuildTabardVote-ci.zip

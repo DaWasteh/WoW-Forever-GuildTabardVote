@@ -1,0 +1,13 @@
+# Build artifacts
+dist/
+
+# OS & editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/
+__pycache__/
+*.pyc

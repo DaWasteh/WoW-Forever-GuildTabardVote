@@ -1,0 +1,23 @@
+## Interface: 16001, 11509, 20506, 120105
+## Title: GuildTabardVote
+## Title-deDE: GuildTabardVote |cffd4af37(Gildenwappen-Abstimmung)|r
+## Notes: Live & timed multi-day guild tabard voting (anonymous GM-only results), real-time preview sync, member suggestions, and saved designs.
+## Notes-deDE: Live- & zeitlich begrenzte Gildenwappen-Abstimmungen (anonym, Ergebnisse nur für Gildenmeister), Live-Vorschau, eigene Vorschläge und Designs speichern/laden.
+## Author: DaWasteh
+## Version: 0.1.0
+## IconTexture: Interface\AddOns\GuildTabardVote\Media\icon
+## Category: Guild
+## Category-deDE: Gilde
+## SavedVariables: GuildTabardVoteDB
+## AddonCompartmentFunc: GuildTabardVote_OnAddonCompartmentClick
+## AddonCompartmentFuncOnEnter: GuildTabardVote_OnAddonCompartmentEnter
+## AddonCompartmentFuncOnLeave: GuildTabardVote_OnAddonCompartmentLeave
+
+Locale.lua
+Core.lua
+Storage.lua
+TabardSync.lua
+Protocol.lua
+UI_Prompt.lua
+UI_LeaderPanel.lua
+UI_MemberWindow.lua
