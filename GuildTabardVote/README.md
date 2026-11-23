@@ -4,6 +4,43 @@
 
 ---
 
+## Installation (Deutsch)
+
+### Option 1: Direkt per ZIP (empfohlen & sofort startklar)
+1. Öffne die [aktuelle Release-Seite](https://github.com/DaWasteh/WoW-Forever-GuildTabardVote/releases/latest).
+2. Lade unten bei **Assets** die Datei **`GuildTabardVote-vX.X.zip`** herunter.
+3. Entpacke die ZIP-Datei und kopiere den Ordner **`GuildTabardVote`** direkt in deinen WoW: Forever AddOn-Ordner:
+   - Standardpfad Windows: `C:\Program Files (x86)\World of Warcraft\_forever_\Interface\AddOns\GuildTabardVote`
+   - *(Falls du WoW auf einer anderen Festplatte installiert hast, entsprechend in `...\World of Warcraft\_forever_\Interface\AddOns\GuildTabardVote`.)*
+4. Stelle sicher, dass im Ordner `GuildTabardVote` direkt die Datei `GuildTabardVote.toc` liegt (nicht doppelt verschachtelt wie `GuildTabardVote\GuildTabardVote\`).
+5. Starte **WoW: Forever** neu — fertig! Im Spiel kannst du sofort mit `/wappen test` prüfen, ob alles läuft.
+
+> **Hinweis zur CurseForge-App:** Manuell in `Interface\AddOns\` entpackte Addons werden von der CurseForge-App nicht überschrieben und funktionieren ganz normal im Spiel. Sobald das Addon auch auf CurseForge freigeschaltet ist, kann es dort direkt per Suche installiert und automatisch aktualisiert werden.
+
+### Option 2: Über WowUp (mit Auto-Updates direkt von GitHub)
+1. Öffne **WowUp** und wähle **WoW: Forever**.
+2. Klicke auf **„Install from URL“** (Aus URL installieren).
+3. Füge diese Repository-URL ein:
+   `https://github.com/DaWasteh/WoW-Forever-GuildTabardVote`
+4. Fertig — WowUp installiert automatisch das neueste GitHub-Release und hält es aktuell.
+
+---
+
+## Installation (English)
+
+### Option 1: Direct ZIP Download (Recommended)
+1. Go to the [latest release page](https://github.com/DaWasteh/WoW-Forever-GuildTabardVote/releases/latest).
+2. Under **Assets**, download **`GuildTabardVote-vX.X.zip`**.
+3. Extract the archive and place the **`GuildTabardVote`** folder inside your WoW: Forever AddOns directory:
+   `...\World of Warcraft\_forever_\Interface\AddOns\GuildTabardVote`
+4. Restart **WoW: Forever** and run `/wappen test` to try it out.
+
+### Option 2: Via WowUp (Auto-Updates from GitHub)
+1. Open **WowUp**, select **WoW: Forever**, and click **Install from URL**.
+2. Paste `https://github.com/DaWasteh/WoW-Forever-GuildTabardVote` and confirm.
+
+---
+
 ## Features (Deutsch)
 
 - **Designs speichern & laden (Gildenmeister & Mitglieder):** Speichere beliebig viele eigene oder vorgeschlagene Wappen-Designs mit Namen (accountweit gespeichert), sieh sie jederzeit als 2D-Miniaturvorschau, lade sie per Klick in den Designer oder direkt ins offizielle Wappenmeister-Menü und reiche sie direkt in laufende Abstimmungen ein.
@@ -11,6 +48,7 @@
 - **100 % anonym & Auswertung nur für den Gildenmeister:** Sowohl Gildenmeister als auch alle Gildenmitglieder sehen **alle eingereichten Designs** in 2D & 3D. Die **Stimmenanzahl pro Design** (Daumen hoch / runter / Enthalten) sieht jedoch **ausschließlich der Gildenmeister** — und zwar vollständig **anonym** (ohne Spielernamen, über zufällige anonyme Wahl-Tokens).
 - **Live-Modus am Gildenwappenmeister:** Sobald der Gildenmeister beim NPC das Wappenmenü öffnet (oder `/wappen start` nutzt), erhalten online befindliche Gildenmitglieder automatisch die Anfrage **„Mitentscheiden“** oder **„Enthalten“** und sehen alle Änderungen live in 3D & 2D.
 - **1-Klick-Übernahme:** Der Gildenmeister kann jedes gespeicherte Design, jeden Live-Vorschlag und das Sieger-Design einer Zeit-Abstimmung per Klick auf **„Übernehmen“** direkt auf das offizielle Wappenmeister-Fenster laden!
+- **Interaktive 3D-Vorschau:** Linksklick ziehen zum Drehen, Mausrad zum Zoomen, Rechtsklick ziehen zum Verschieben + Reset-Button.
 - **Solo-Testmodus (`/wappen test`):** Teste alle Modi (Live-Wahl, X-Tage-Wahl, anonyme GM-Auswertung & gespeicherte Designs) sofort alleine!
 
 ## Features (English)
