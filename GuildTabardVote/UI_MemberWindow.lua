@@ -560,8 +560,7 @@ local function EnsureWindow()
             ShowToast(GTV.L.SUGG_NEED_GUILD, 1.0, 0.65, 0.35)
             return
         end
-        local scopeId = GTV.Storage:GetBoardScopeId(board)
-        local myBallot = GTV.Storage:GetMyBallot(scopeId)
+        local myBallot = GTV.Protocol:GetMyCurrentBallot(board)
         local newVal = not myBallot.abstained
         if GTV.Protocol:SetTimedPollAbstain(newVal) then
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
@@ -710,9 +709,17 @@ local function EnsureWindow()
     rightTitle:SetTextColor(1.0, 0.84, 0.30)
     f.rightTitle = rightTitle
 
+    local gmSummaryText = rightPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    gmSummaryText:SetPoint("TOPLEFT", rightTitle, "BOTTOMLEFT", 0, -2)
+    gmSummaryText:SetWidth(274)
+    gmSummaryText:SetJustifyH("LEFT")
+    gmSummaryText:Hide()
+    f.gmSummaryText = gmSummaryText
+
     local scrollFrame = CreateFrame("ScrollFrame", "GTVMemberRightScroll", rightPanel, "UIPanelScrollFrameTemplate")
-    scrollFrame:SetPoint("TOPLEFT", rightPanel, "TOPLEFT", 6, -32)
+    scrollFrame:SetPoint("TOPLEFT", rightPanel, "TOPLEFT", 6, -42)
     scrollFrame:SetPoint("BOTTOMRIGHT", rightPanel, "BOTTOMRIGHT", -26, 8)
+    f.rightScroll = scrollFrame
 
     local scrollChild = CreateFrame("Frame", nil, scrollFrame)
     scrollChild:SetSize(256, 360)
@@ -744,13 +751,9 @@ function UI_MemberWindow:RefreshLiveVoteButtons()
     if s and not sel then
         myVote = s.myVote
     elseif sel then
-        local board = GTV.Protocol:GetGuildBoard(false)
-        if board then
-            local scopeId = GTV.Storage:GetBoardScopeId(board)
-            local myBallot = GTV.Storage:GetMyBallot(scopeId)
-            if not myBallot.abstained then
-                myVote = myBallot.votes[sel.id]
-            end
+        local myBallot = GTV.Protocol:GetMyCurrentBallot()
+        if myBallot and not myBallot.abstained then
+            myVote = myBallot.votes[sel.id]
         end
     end
 
@@ -796,11 +799,17 @@ local function AcquireRightRow(index)
 
     row.header = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.header:SetPoint("TOPLEFT", row.thumb, "TOPRIGHT", 8, -2)
-    row.header:SetWidth(134)
+    row.header:SetWidth(92)
     row.header:SetJustifyH("LEFT")
 
-    row.gmBadge = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    row.gmBadge:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -8)
+    row.gmBadgeFrame = CreateFrame("Frame", nil, row)
+    row.gmBadgeFrame:SetSize(78, 18)
+    row.gmBadgeFrame:SetPoint("TOPRIGHT", row, "TOPRIGHT", -26, -4)
+    row.gmBadgeFrame:EnableMouse(true)
+
+    row.gmBadge = row.gmBadgeFrame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    row.gmBadge:SetPoint("RIGHT", row.gmBadgeFrame, "RIGHT", 0, 0)
+    row.gmBadge:SetJustifyH("RIGHT")
 
     row.note = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.note:SetPoint("TOPLEFT", row.header, "BOTTOMLEFT", 0, -2)
@@ -844,6 +853,7 @@ local function RefreshRightList()
 
     -- SAVED DESIGNS TAB
     if activeTab == "SAVED" then
+        win.gmSummaryText:Hide()
         local saved = GTV.Storage:GetSavedDesigns()
         win.rightTitle:SetText(string.format(GTV.L.TAB_SAVED, #saved))
         if #saved == 0 then
@@ -862,6 +872,7 @@ local function RefreshRightList()
             row.thumb:SetDesign(entry.design)
             row.header:SetText(entry.name)
             row.gmBadge:SetText("")
+            row.gmBadgeFrame:Hide()
             row.note:SetText("")
             row.delBtn:Hide()
 
@@ -923,11 +934,18 @@ local function RefreshRightList()
 
     local board = GTV.Protocol:GetGuildBoard(false)
     local poll = board and board.timedPoll or nil
-    local scopeId = GTV.Storage:GetBoardScopeId(board)
-    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local myBallot = GTV.Protocol:GetMyCurrentBallot(board)
     local canVote = GTV.Protocol:IsGuildBoardOpenForChanges()
     -- PRIVACY: ONLY the actual Guild Master sees anonymous vote counts (hidden from regular members & member view in test mode!)
     local showGMCounts = (not GTV.Protocol:IsTestModeActive()) and GTV:IsGuildLeader()
+
+    if showGMCounts then
+        local _, voters, abstained = GTV.Protocol:GetBoardStats()
+        win.gmSummaryText:SetText(string.format(GTV.L.GM_BOARD_SUMMARY, voters, abstained))
+        win.gmSummaryText:Show()
+    else
+        win.gmSummaryText:Hide()
+    end
 
     local y = -4
     for i, d in ipairs(designs) do
@@ -952,11 +970,28 @@ local function RefreshRightList()
         local canDel = GTV.Protocol:CanDeleteDesign(d)
         if showGMCounts then
             local up, down = GTV.Protocol:GetDesignVotes(d.id)
-            row.gmBadge:SetText(string.format(GTV.L.TIMED_GM_COUNTS, up, down))
-            row.gmBadge:ClearAllPoints()
-            row.gmBadge:SetPoint("TOPRIGHT", row, "TOPRIGHT", canDel and -28 or -8, -8)
+            local totalV = up + down
+            row.gmBadge:SetText(string.format(GTV.L.GM_VOTES_BADGE, up, down, totalV))
+            row.gmBadgeFrame:ClearAllPoints()
+            row.gmBadgeFrame:SetPoint("TOPRIGHT", row, "TOPRIGHT", canDel and -26 or -6, -4)
+            row.gmBadgeFrame:Show()
+            row.gmBadgeFrame:SetScript("OnEnter", function(self)
+                if not GameTooltip then return end
+                GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+                GameTooltip:AddLine(GTV.L.GM_DESIGN_TIP_TITLE, 1.0, 0.84, 0.30)
+                GameTooltip:AddLine(GTV.L.TOOLTIP_UP .. " " .. tostring(up), 0.28, 0.95, 0.42)
+                GameTooltip:AddLine(GTV.L.TOOLTIP_DOWN .. " " .. tostring(down), 1.0, 0.36, 0.36)
+                GameTooltip:AddLine(string.format(GTV.L.GM_DESIGN_TIP_TOTAL, totalV), 0.9, 0.9, 0.9)
+                GameTooltip:AddLine(" ")
+                GameTooltip:AddLine(GTV.L.TOOLTIP_ANON_FOOTER, 0.65, 0.78, 0.95, true)
+                GameTooltip:Show()
+            end)
+            row.gmBadgeFrame:SetScript("OnLeave", function()
+                if GameTooltip then GameTooltip:Hide() end
+            end)
         else
             row.gmBadge:SetText("")
+            row.gmBadgeFrame:Hide()
         end
 
         if canDel then
@@ -1061,8 +1096,7 @@ function UI_MemberWindow:Refresh()
 
     -- Refresh Timed Poll bar
     local designs = GTV.Protocol:GetGuildDesigns()
-    local scopeId = board and GTV.Storage:GetBoardScopeId(board) or "default"
-    local myBallot = GTV.Storage:GetMyBallot(scopeId)
+    local myBallot = GTV.Protocol:GetMyCurrentBallot(board)
     local boardOpen = GTV.Protocol:IsGuildBoardOpenForChanges()
 
     if poll then

@@ -1,7 +1,7 @@
 local ADDON_NAME, GTV = ...
 
 GTV.ADDON_NAME = ADDON_NAME
-GTV.VERSION = "0.2.0"
+GTV.VERSION = "0.3.0"
 GTV.PREFIX = "GTV1"
 GTV.MEDIA_PATH = "Interface\\AddOns\\GuildTabardVote\\Media\\"
 
@@ -99,7 +99,19 @@ function GTV:IsGuildLeader()
         return true
     end
     local guildName, _, rankIndex = GetGuildInfo("player")
-    return guildName ~= nil and rankIndex == 0
+    if guildName ~= nil and rankIndex == 0 then
+        return true
+    end
+    if C_GuildInfo and C_GuildInfo.GetGuildRankOrder and UnitGUID then
+        local guid = UnitGUID("player")
+        if guid then
+            local ok, order = pcall(C_GuildInfo.GetGuildRankOrder, guid)
+            if ok and order == 1 then
+                return true
+            end
+        end
+    end
+    return false
 end
 
 function GTV:CanSeeLeaderVotes()
@@ -183,6 +195,9 @@ function GTV:TryHookBlizzardTabardFrame()
             end
             if not GTV:IsGuildLeader() then
                 return
+            end
+            if GTV.Protocol then
+                GTV.Protocol:ExitTestMode()
             end
             if GTV.UI_LeaderPanel then
                 GTV.UI_LeaderPanel:ShowForVendorFrame()
@@ -356,11 +371,15 @@ local function HandleSlashCommand(msg)
             GTV:Print(GTV.L.LEADER_NOT_LEADER)
             return
         end
+        GTV.Protocol:ExitTestMode()
         GTV.UI_LeaderPanel:ShowStandalone(false)
         return
     end
 
-    -- Default `/wappen`
+    -- Default `/wappen`: exit lingering test mode when opening real guild board
+    if GTV.Protocol:IsTestModeActive() and not (GTV.UI_LeaderPanel and GTV.UI_LeaderPanel.IsShown and GTV.UI_LeaderPanel:IsShown()) then
+        GTV.Protocol:ExitTestMode()
+    end
     if GTV.Protocol:IsLeading() then
         if GTV.Protocol:IsLeaderVendorSession() then
             GTV.UI_LeaderPanel:ShowForVendorFrame()
@@ -417,12 +436,23 @@ end
 
 -- Bootstrap events
 local bootFrame = CreateFrame("Frame")
-local guildSyncedOnce = false
+local lastSyncedGuildKey = nil
 bootFrame:RegisterEvent("ADDON_LOADED")
 bootFrame:RegisterEvent("PLAYER_LOGIN")
 bootFrame:RegisterEvent("PLAYER_REGEN_ENABLED")
 bootFrame:RegisterEvent("PLAYER_GUILD_UPDATE")
 bootFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
+
+local function TrySyncGuildIfReady()
+    if not GTV.Storage or not GTV.Protocol then
+        return
+    end
+    local gKey = GTV.Storage:GetGuildKey(false)
+    if gKey and gKey ~= lastSyncedGuildKey then
+        lastSyncedGuildKey = gKey
+        GTV.Protocol:OnLoginSync()
+    end
+end
 
 bootFrame:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" and arg1 == ADDON_NAME then
@@ -439,23 +469,16 @@ bootFrame:SetScript("OnEvent", function(_, event, arg1)
         if GTV.Protocol then
             GTV.Protocol:Init()
         end
+        if C_GuildInfo and C_GuildInfo.GuildRoster then
+            pcall(C_GuildInfo.GuildRoster)
+        end
         GTV:TryHookBlizzardTabardFrame()
         C_Timer.After(2, function()
             GTV:TryHookBlizzardTabardFrame()
         end)
-        C_Timer.After(3.5, function()
-            if GTV.Protocol and not guildSyncedOnce then
-                guildSyncedOnce = true
-                GTV.Protocol:OnLoginSync()
-            end
-        end)
+        C_Timer.After(3.5, TrySyncGuildIfReady)
     elseif event == "PLAYER_GUILD_UPDATE" or event == "GUILD_ROSTER_UPDATE" then
-        if not guildSyncedOnce and GTV:GetGuildName() and GTV.Protocol then
-            guildSyncedOnce = true
-            C_Timer.After(1.0, function()
-                GTV.Protocol:OnLoginSync()
-            end)
-        end
+        C_Timer.After(0.5, TrySyncGuildIfReady)
     elseif event == "PLAYER_REGEN_ENABLED" then
         if GTV.UI_Prompt and GTV.UI_Prompt.ShowDeferredIfNeeded then
             GTV.UI_Prompt:ShowDeferredIfNeeded()

@@ -146,6 +146,9 @@ local function EnsurePanel()
         if isStandaloneMode and GTV.Protocol:IsLeading() then
             GTV.Protocol:EndLeaderSession(false)
         end
+        if GTV.Protocol:IsTestModeActive() then
+            GTV.Protocol:ExitTestMode()
+        end
         f:Hide()
     end)
 
@@ -715,11 +718,17 @@ local function RenderGuildDesignList(scrollChild, emptyText, rowPool, poll, isOp
 
             row.titleText = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
             row.titleText:SetPoint("TOPLEFT", row.thumb, "TOPRIGHT", 8, -1)
-            row.titleText:SetWidth(122)
+            row.titleText:SetWidth(104)
             row.titleText:SetJustifyH("LEFT")
 
-            row.votesText = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-            row.votesText:SetPoint("TOPRIGHT", row, "TOPRIGHT", -8, -7)
+            row.votesBadge = CreateFrame("Frame", nil, row)
+            row.votesBadge:SetSize(84, 18)
+            row.votesBadge:SetPoint("TOPRIGHT", row, "TOPRIGHT", -6, -4)
+            row.votesBadge:EnableMouse(true)
+
+            row.votesText = row.votesBadge:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            row.votesText:SetPoint("RIGHT", row.votesBadge, "RIGHT", 0, 0)
+            row.votesText:SetJustifyH("RIGHT")
 
             row.noteText = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
             row.noteText:SetPoint("TOPLEFT", row.titleText, "BOTTOMLEFT", 0, -2)
@@ -752,7 +761,22 @@ local function RenderGuildDesignList(scrollChild, emptyText, rowPool, poll, isOp
         row.thumb:SetDesign(d.design)
         row.titleText:SetText((isWinner and GTV.L.TIMED_WINNER_TAG or "") .. d.authorName)
         row.noteText:SetText(d.note ~= "" and ("\"" .. d.note .. "\"") or "")
-        row.votesText:SetText(string.format(GTV.L.TIMED_GM_COUNTS, item.up, item.down))
+        local totalDesignVotes = item.up + item.down
+        row.votesText:SetText(string.format(GTV.L.GM_VOTES_BADGE, item.up, item.down, totalDesignVotes))
+        row.votesBadge:SetScript("OnEnter", function(self)
+            if not GameTooltip then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(GTV.L.GM_DESIGN_TIP_TITLE, 1.0, 0.84, 0.30)
+            GameTooltip:AddLine(GTV.L.TOOLTIP_UP .. " " .. tostring(item.up), 0.28, 0.95, 0.42)
+            GameTooltip:AddLine(GTV.L.TOOLTIP_DOWN .. " " .. tostring(item.down), 1.0, 0.36, 0.36)
+            GameTooltip:AddLine(string.format(GTV.L.GM_DESIGN_TIP_TOTAL, totalDesignVotes), 0.9, 0.9, 0.9)
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine(GTV.L.TOOLTIP_ANON_FOOTER, 0.65, 0.78, 0.95, true)
+            GameTooltip:Show()
+        end)
+        row.votesBadge:SetScript("OnLeave", function()
+            if GameTooltip then GameTooltip:Hide() end
+        end)
 
         row.applyBtn:SetScript("OnClick", function()
             GTV:PlaySound("IG_MAINMENU_OPTION", 852)
@@ -945,6 +969,9 @@ function UI_LeaderPanel:ShowForVendorFrame()
     end
     f.title:SetText(GTV.L.LEADER_PANEL_TITLE)
     f:Show()
+    if IsInGuild and IsInGuild() then
+        GTV.Protocol:SendGuildBoardHello()
+    end
     self:Refresh()
 end
 
@@ -958,6 +985,9 @@ function UI_LeaderPanel:ShowStandalone(isTestMode)
     f:SetPoint("CENTER", UIParent, "CENTER", isTestMode and -260 or 0, 0)
     f.title:SetText(isTestMode and (GTV.L.LEADER_PANEL_TITLE .. " (TEST)") or GTV.L.LEADER_PANEL_TITLE)
     f:Show()
+    if not isTestMode and IsInGuild and IsInGuild() then
+        GTV.Protocol:SendGuildBoardHello()
+    end
 
     C_Timer.After(0.05, function()
         if not f:IsShown() then return end
@@ -971,6 +1001,10 @@ end
 
 function UI_LeaderPanel:IsDockedToVendor()
     return dockedToVendor
+end
+
+function UI_LeaderPanel:IsShown()
+    return panel and panel:IsShown() or false
 end
 
 function UI_LeaderPanel:Hide()

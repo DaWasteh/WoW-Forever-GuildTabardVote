@@ -16,6 +16,7 @@ Protocol.suggestionCounter = 0
 Protocol.testModeActive = false
 
 local listeners = {}
+local versionNotified = false
 
 function Protocol:RegisterCallback(fn)
     table.insert(listeners, fn)
@@ -86,6 +87,102 @@ local function SplitPipe(str)
     return out
 end
 
+local function CompareVersions(a, b)
+    local function parse(v)
+        local p1, p2, p3 = tostring(v or "0.0.0"):match("(%d+)%.?(%d*)%.?(%d*)")
+        return tonumber(p1) or 0, tonumber(p2) or 0, tonumber(p3) or 0
+    end
+    local a1, a2, a3 = parse(a)
+    local b1, b2, b3 = parse(b)
+    if a1 ~= b1 then return a1 > b1 end
+    if a2 ~= b2 then return a2 > b2 end
+    return a3 > b3
+end
+
+-- Tiny deterministic checksum over designs, tombstones, timed poll, and ALL individual votes
+local function ComputeBoardSignature(board)
+    if not board then
+        return "0:0:0:0:0"
+    end
+    local parts = {}
+    for _, d in ipairs(board.designs) do
+        table.insert(parts, "D:" .. tostring(d.id))
+    end
+    local delCount = 0
+    for did in pairs(board.deletedIds) do
+        delCount = delCount + 1
+        table.insert(parts, "X:" .. tostring(did))
+    end
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    local ballots = GTV.Storage:GetBallotMap(board, scopeId)
+    local voteEntries = 0
+    for hash, b in pairs(ballots) do
+        if b.abstained then
+            voteEntries = voteEntries + 1
+            table.insert(parts, "A:" .. tostring(hash) .. ":" .. tostring(b.rev or 0))
+        elseif b.votes then
+            for did, v in pairs(b.votes) do
+                voteEntries = voteEntries + 1
+                table.insert(parts, "V:" .. tostring(hash) .. ":" .. tostring(did) .. ":" .. tostring(v))
+            end
+        end
+    end
+    table.sort(parts)
+    local h = 5381
+    for _, s in ipairs(parts) do
+        for i = 1, #s do
+            h = (h * 33 + string.byte(s, i)) % 2147483647
+        end
+    end
+    local pollSig = (board.timedPoll and (board.timedPoll.id .. "_" .. tostring(board.timedPoll.status))) or "0"
+    return string.format("%d:%d:%d:%s:%d", #board.designs, delCount, voteEntries, pollSig, h)
+end
+
+-- Serialize a voter's ballot votes into compact "id1=U,id2=D" chunks <= 170 chars
+local function EncodeBallotVotes(votes)
+    local items = {}
+    if votes then
+        for did, v in pairs(votes) do
+            if v == "UP" or v == "DOWN" then
+                table.insert(items, tostring(did) .. "=" .. (v == "UP" and "U" or "D"))
+            end
+        end
+    end
+    table.sort(items)
+    local str = table.concat(items, ",")
+    if #str <= 170 then
+        return { str }
+    end
+    -- Fallback chunking if a guild has huge number of designs
+    local chunks, cur = {}, ""
+    for _, item in ipairs(items) do
+        if #cur > 0 and (#cur + #item + 1) > 170 then
+            table.insert(chunks, cur)
+            cur = item
+        else
+            cur = (#cur > 0) and (cur .. "," .. item) or item
+        end
+    end
+    if #cur > 0 then
+        table.insert(chunks, cur)
+    end
+    return chunks
+end
+
+local function DecodeBallotVotes(str)
+    local out = {}
+    if not str or str == "" then
+        return out
+    end
+    for pair in str:gmatch("[^,]+") do
+        local did, code = pair:match("^([^=]+)=([UD])$")
+        if did and code then
+            out[did] = (code == "U") and "UP" or "DOWN"
+        end
+    end
+    return out
+end
+
 function Protocol:Init()
     if C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix then
         C_ChatInfo.RegisterAddonMessagePrefix(GTV.PREFIX)
@@ -107,6 +204,17 @@ end
 
 function Protocol:IsTestModeActive()
     return self.testModeActive == true or (self.session and self.session.isTestMode == true)
+end
+
+function Protocol:ExitTestMode()
+    if not self.testModeActive and not (self.session and self.session.isTestMode) then
+        return
+    end
+    self.testModeActive = false
+    if self.session and self.session.isTestMode then
+        self.session = nil
+    end
+    FireCallbacks("GUILD_BOARD_CHANGED", self:GetGuildBoard(false))
 end
 
 function Protocol:SendGuild(payload)
@@ -165,7 +273,7 @@ local function CreateSessionObject(sessionId, leaderKey, leaderDisplay, autoRese
 end
 
 -- =========================================================================
--- UNIFIED PERSISTENT GUILD DESIGN BOARD (ALWAYS AVAILABLE IN ANY GUILD!)
+-- UNIFIED PERSISTENT GUILD DESIGN BOARD
 -- =========================================================================
 function Protocol:GetGuildBoard(createIfMissing)
     local gKey = GTV.Storage:GetGuildKey(self:IsTestModeActive())
@@ -202,7 +310,6 @@ function Protocol:IsTimedPollOpen(poll)
     return GTV.Storage:Now() < (poll.endsAt or 0)
 end
 
--- Voting & submitting on the Guild Board is ALWAYS open unless a Timed Poll explicitly ended/closed!
 function Protocol:IsGuildBoardOpenForChanges()
     local board = self:GetGuildBoard(true)
     if not board then
@@ -243,15 +350,14 @@ function Protocol:SubmitGuildDesign(design, note, bypassCooldown)
 
     self:AddGuildDesignLocal(board, designId, meShort, meKey, createdAt, design, cleanNote)
 
-    local msg = table.concat({
+    self:SendGuild(table.concat({
         "GB_ADD",
         designId,
         SanitizeText(meShort, 24),
         tostring(createdAt),
         SerializeDesign(design),
         cleanNote,
-    }, "|")
-    self:SendGuild(msg)
+    }, "|"))
 
     if not bypassCooldown then
         GTV:Print(GTV.L.SUGG_SENT)
@@ -322,6 +428,41 @@ function Protocol:RemoveGuildDesignLocal(board, designId)
     return true
 end
 
+local function GetVoterHashForBoard(board, scopeId)
+    local key = GTV.Storage:GetMyBallotKey(board, scopeId)
+    return GTV.Storage:GetVoterHash(key)
+end
+
+function Protocol:GetMyCurrentBallot(board)
+    board = board or self:GetGuildBoard(false)
+    if not board then
+        return GTV.Storage:GetMyBallot("default")
+    end
+    local scopeId = GTV.Storage:GetBoardScopeId(board)
+    return GTV.Storage:GetMyBallot(GTV.Storage:GetMyBallotKey(board, scopeId))
+end
+
+local function BroadcastSingleBallot(self, scopeId, hash, ballot)
+    local rev = tonumber(ballot.rev) or GTV.Storage:Now()
+    if ballot.abstained then
+        self:SendGuild(table.concat({ "GB_BALLOT", scopeId, hash, tostring(rev), "1", "" }, "|"))
+        return
+    end
+    local chunks = EncodeBallotVotes(ballot.votes)
+    if #chunks == 1 then
+        self:SendGuild(table.concat({ "GB_BALLOT", scopeId, hash, tostring(rev), "0", chunks[1] }, "|"))
+    else
+        -- Multi-chunk fallback: send individual GB_VOTE packets after clearing
+        self:SendGuild(table.concat({ "GB_BALLOT", scopeId, hash, tostring(rev), "0", chunks[1] }, "|"))
+        for i = 2, #chunks do
+            local ch = chunks[i]
+            C_Timer.After((i - 1) * 0.12, function()
+                self:SendGuild(table.concat({ "GB_BALLOT_ADD", scopeId, hash, tostring(rev), ch }, "|"))
+            end)
+        end
+    end
+end
+
 -- Cast an anonymous UP/DOWN vote on ANY design on the Guild Board
 function Protocol:VoteGuildDesign(designId, vote)
     local okOpen, errMsg = self:IsGuildBoardOpenForChanges()
@@ -335,21 +476,26 @@ function Protocol:VoteGuildDesign(designId, vote)
     end
 
     local scopeId = GTV.Storage:GetBoardScopeId(board)
-    local myBallot = GTV.Storage:GetMyBallot(scopeId)
-    local hash = GTV.Storage:GetVoterHash(scopeId)
+    local myBallot = self:GetMyCurrentBallot(board)
+    local hash = GetVoterHashForBoard(board, scopeId)
     local ballots = GTV.Storage:GetBallotMap(board, scopeId)
 
     if myBallot.votes[designId] == vote then
         vote = "NONE"
     end
+    myBallot.rev = math.max((myBallot.rev or 0) + 1, GTV.Storage:Now())
     myBallot.abstained = false
     myBallot.votes[designId] = (vote ~= "NONE") and vote or nil
 
-    ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+    ballots[hash] = ballots[hash] or { rev = 0, abstained = false, votes = {} }
+    ballots[hash].rev = myBallot.rev
     ballots[hash].abstained = false
-    ballots[hash].votes[designId] = myBallot.votes[designId]
+    ballots[hash].votes = {}
+    for k, v in pairs(myBallot.votes) do
+        ballots[hash].votes[k] = v
+    end
 
-    self:SendGuild(table.concat({ "GB_VOTE", scopeId, hash, designId, vote }, "|"))
+    BroadcastSingleBallot(self, scopeId, hash, ballots[hash])
     FireCallbacks("GUILD_BOARD_CHANGED", board)
     return true, vote
 end
@@ -366,22 +512,24 @@ function Protocol:SetTimedPollAbstain(abstain)
     end
 
     local scopeId = GTV.Storage:GetBoardScopeId(board)
-    local myBallot = GTV.Storage:GetMyBallot(scopeId)
-    local hash = GTV.Storage:GetVoterHash(scopeId)
+    local myBallot = self:GetMyCurrentBallot(board)
+    local hash = GetVoterHashForBoard(board, scopeId)
     local ballots = GTV.Storage:GetBallotMap(board, scopeId)
 
+    myBallot.rev = math.max((myBallot.rev or 0) + 1, GTV.Storage:Now())
     myBallot.abstained = abstain and true or false
     if myBallot.abstained then
         wipe(myBallot.votes)
     end
 
-    ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+    ballots[hash] = ballots[hash] or { rev = 0, abstained = false, votes = {} }
+    ballots[hash].rev = myBallot.rev
     ballots[hash].abstained = myBallot.abstained
     if myBallot.abstained then
         wipe(ballots[hash].votes)
     end
 
-    self:SendGuild(table.concat({ "GB_ABSTAIN", scopeId, hash, myBallot.abstained and "1" or "0" }, "|"))
+    BroadcastSingleBallot(self, scopeId, hash, ballots[hash])
     FireCallbacks("GUILD_BOARD_CHANGED", board)
     return true
 end
@@ -427,8 +575,44 @@ function Protocol:GetBoardStats()
     return designCount, voters, abstained
 end
 
+-- Copy existing BOARD ballots into a new keepExisting timed poll scope so zero votes are lost!
+local function CarryOverBoardBallots(board, newPollId)
+    local src = GTV.Storage:GetBallotMap(board, GTV.Storage.DEFAULT_BOARD_SCOPE)
+    local dst = GTV.Storage:GetBallotMap(board, newPollId)
+    for h, b in pairs(src) do
+        if not dst[h] then
+            local copyVotes = {}
+            if b.votes then
+                for did, v in pairs(b.votes) do
+                    if board.designById[did] then
+                        copyVotes[did] = v
+                    end
+                end
+            end
+            dst[h] = {
+                rev = tonumber(b.rev) or 1,
+                abstained = b.abstained and true or false,
+                votes = copyVotes,
+            }
+        end
+    end
+
+    -- Also carry over local player's own ballot & hash
+    local oldMy = GTV.Storage:GetMyBallot(GTV.Storage:GetMyBallotKey(board, GTV.Storage.DEFAULT_BOARD_SCOPE))
+    local newMy = GTV.Storage:GetMyBallot(GTV.Storage:GetMyBallotKey(board, newPollId))
+    if next(newMy.votes) == nil and not newMy.abstained then
+        newMy.abstained = oldMy.abstained and true or false
+        newMy.rev = oldMy.rev or 1
+        for did, v in pairs(oldMy.votes) do
+            if board.designById[did] then
+                newMy.votes[did] = v
+            end
+        end
+    end
+end
+
 -- =========================================================================
--- TIMED MULTI-DAY POLLS (ON TOP OF UNIFIED GUILD BOARD)
+-- TIMED MULTI-DAY POLLS
 -- =========================================================================
 function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign, keepExisting)
     local isTest = self:IsTestModeActive()
@@ -448,7 +632,8 @@ function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign, keepExi
         return nil
     end
 
-    if keepExisting == false then
+    local keep = (keepExisting ~= false)
+    if not keep then
         for _, d in ipairs(board.designs) do
             board.deletedIds[d.id] = true
         end
@@ -473,10 +658,14 @@ function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign, keepExi
         endsAt = now + durationSeconds,
         status = "ACTIVE",
         winnerDesignId = nil,
+        keepExisting = keep,
     }
+    if keep then
+        CarryOverBoardBallots(board, pollId)
+    end
     GTV.Storage:MarkPollPrompted(pollId)
 
-    local metaMsg = table.concat({
+    self:SendGuild(table.concat({
         "TP_META",
         pollId,
         tostring(now),
@@ -484,9 +673,8 @@ function Protocol:CreateTimedPoll(title, durationSeconds, initialDesign, keepExi
         "ACTIVE",
         SanitizeText(meShort, 24),
         cleanTitle,
-        keepExisting == false and "0" or "1",
-    }, "|")
-    self:SendGuild(metaMsg)
+        keep and "1" or "0",
+    }, "|"))
 
     if initialDesign then
         self:SubmitGuildDesign(initialDesign, cleanTitle, true)
@@ -556,30 +744,14 @@ function Protocol:AnnounceTimedPollWinner()
     end
 end
 
-local versionNotified = false
-
-local function CompareVersions(a, b)
-    local function parse(v)
-        local p1, p2, p3 = tostring(v or "0.0.0"):match("(%d+)%.?(%d*)%.?(%d*)")
-        return tonumber(p1) or 0, tonumber(p2) or 0, tonumber(p3) or 0
-    end
-    local a1, a2, a3 = parse(a)
-    local b1, b2, b3 = parse(b)
-    if a1 ~= b1 then return a1 > b1 end
-    if a2 ~= b2 then return a2 > b2 end
-    return a3 > b3
-end
-
--- Peer-to-peer sync of ALL Guild Designs, Timed Poll metadata, and anonymous ballots!
+-- Checksum-based peer-to-peer sync: detects ANY difference in designs, deletions, or individual votes!
 function Protocol:SendGuildBoardHello()
     if not self:IsTestModeActive() and not (IsInGuild and IsInGuild()) then
         return
     end
     local board = self:GetGuildBoard(true)
-    local dCount = board and #board.designs or 0
-    local pollId = (board and board.timedPoll and board.timedPoll.id) or "0"
-    local _, vCount, aCount = self:GetBoardStats()
-    self:SendGuild(table.concat({ "GB_HELLO", tostring(dCount), pollId, tostring(vCount + aCount), GTV.VERSION }, "|"))
+    local sig = ComputeBoardSignature(board)
+    self:SendGuild(table.concat({ "GB_HELLO", sig, GTV.VERSION }, "|"))
 end
 
 function Protocol:BroadcastGuildBoardSnapshot(board)
@@ -587,7 +759,7 @@ function Protocol:BroadcastGuildBoardSnapshot(board)
         return
     end
     local now = GetTime and GetTime() or 0
-    if (now - self.lastBoardSyncReplyAt) < 2.5 then
+    if (now - self.lastBoardSyncReplyAt) < 2.0 then
         return
     end
     self.lastBoardSyncReplyAt = now
@@ -603,9 +775,9 @@ function Protocol:BroadcastGuildBoardSnapshot(board)
             p.status,
             SanitizeText(p.leaderName, 24),
             SanitizeText(p.title, 34),
-            "1",
+            p.keepExisting == false and "0" or "1",
         }, "|"))
-        delay = delay + 0.15
+        delay = delay + 0.14
     end
 
     for _, d in ipairs(board.designs) do
@@ -620,27 +792,30 @@ function Protocol:BroadcastGuildBoardSnapshot(board)
                 SanitizeText(entry.note, 34),
             }, "|"))
         end)
-        delay = delay + 0.14
+        delay = delay + 0.12
     end
 
+    -- Sync deletions (tombstones, capped to last 20 to avoid spam)
+    local delSent = 0
+    for did in pairs(board.deletedIds) do
+        if delSent >= 20 then break end
+        delSent = delSent + 1
+        local idToDel = did
+        C_Timer.After(delay, function()
+            self:SendGuild(table.concat({ "GB_DEL", idToDel }, "|"))
+        end)
+        delay = delay + 0.08
+    end
+
+    -- Sync all anonymous ballots in compact 1-packet-per-voter format
     local scopeId = GTV.Storage:GetBoardScopeId(board)
     local ballots = GTV.Storage:GetBallotMap(board, scopeId)
     for hash, b in pairs(ballots) do
         local h, ballot = hash, b
-        if ballot.abstained then
-            C_Timer.After(delay, function()
-                self:SendGuild(table.concat({ "GB_ABSTAIN", scopeId, h, "1" }, "|"))
-            end)
-            delay = delay + 0.12
-        elseif ballot.votes then
-            for did, v in pairs(ballot.votes) do
-                local designId, val = did, v
-                C_Timer.After(delay, function()
-                    self:SendGuild(table.concat({ "GB_VOTE", scopeId, h, designId, val }, "|"))
-                end)
-                delay = delay + 0.12
-            end
-        end
+        C_Timer.After(delay, function()
+            BroadcastSingleBallot(self, scopeId, h, ballot)
+        end)
+        delay = delay + 0.12
     end
 
     if board.timedPoll and board.timedPoll.status == "CLOSED" then
@@ -704,6 +879,7 @@ function Protocol:StartLeaderSession(model, isStandalone, isTestMode)
 
     if not isTestMode then
         GTV:Print(GTV.L.LEADER_SESSION_STARTED)
+        self:SendGuildBoardHello()
     end
     FireCallbacks("SESSION_STARTED", self.session)
     return true
@@ -750,7 +926,9 @@ function Protocol:EndLeaderSession(wasSaved)
     self:SendGuild(table.concat({ "CLOSE", s.id, wasSaved and "1" or "0" }, "|"))
     self.pendingUpdate = nil
     self.session = nil
-    if not s.isTestMode then
+    if s.isTestMode then
+        self.testModeActive = false
+    else
         GTV:Print(wasSaved and string.format(GTV.L.STATUS_SAVED, s.leaderName) or GTV.L.LEADER_SESSION_STOPPED)
     end
     FireCallbacks("SESSION_ENDED", wasSaved, s.leaderName)
@@ -832,7 +1010,7 @@ function Protocol:ApplyDesignToLeaderModel(design, onDone)
         return false
     end
     if model.EnsureReady then
-        model:EnsureReady()
+        model:EnsureReady(false)
     end
     GTV.TabardSync:SeekModel(model, design, nil, nil, function(ok)
         if self:IsLeading() then
@@ -922,6 +1100,35 @@ function Protocol:GetVoteCounts()
     return up, down, abstain, active
 end
 
+-- Apply an incoming ballot onto canonical scope (and mirror BOARD -> active keepExisting poll if needed)
+local function ApplyIncomingBallot(board, rawScopeId, hash, rev, abstained, votesTable, mergeOnly)
+    local scopeId = GTV.Storage:NormalizeScopeId(rawScopeId)
+    local targetScopes = { scopeId }
+    if scopeId == GTV.Storage.DEFAULT_BOARD_SCOPE and board.timedPoll and board.timedPoll.id and board.timedPoll.keepExisting ~= false then
+        table.insert(targetScopes, board.timedPoll.id)
+    end
+
+    for _, sid in ipairs(targetScopes) do
+        local ballots = GTV.Storage:GetBallotMap(board, sid)
+        local existing = ballots[hash]
+        local existingRev = (existing and tonumber(existing.rev)) or 0
+        if (not existing) or (rev >= existingRev) or mergeOnly then
+            if not existing or not mergeOnly then
+                ballots[hash] = {
+                    rev = math.max(rev, existingRev),
+                    abstained = abstained and true or false,
+                    votes = {},
+                }
+            end
+            if not ballots[hash].abstained and votesTable then
+                for did, v in pairs(votesTable) do
+                    ballots[hash].votes[did] = v
+                end
+            end
+        end
+    end
+end
+
 -- =========================================================================
 -- INCOMING PROTOCOL DISPATCHER
 -- =========================================================================
@@ -954,20 +1161,51 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
     elseif cmd == "GB_DEL" then
         local designId = parts[2]
         if isSelf or not designId then return end
-        local board = self:GetGuildBoard(false)
+        local board = self:GetGuildBoard(true)
         if board then
             self:RemoveGuildDesignLocal(board, designId)
         end
 
+    elseif cmd == "GB_BALLOT" then
+        local scopeId = parts[2]
+        local hash = parts[3]
+        local rev = tonumber(parts[4]) or 1
+        local abstained = (parts[5] == "1")
+        local encodedVotes = parts[6] or ""
+        if isSelf or not scopeId or not hash then return end
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        ApplyIncomingBallot(board, scopeId, hash, rev, abstained, DecodeBallotVotes(encodedVotes), false)
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
+    elseif cmd == "GB_BALLOT_ADD" then
+        local scopeId = parts[2]
+        local hash = parts[3]
+        local rev = tonumber(parts[4]) or 1
+        local encodedVotes = parts[5] or ""
+        if isSelf or not scopeId or not hash then return end
+        local board = self:GetGuildBoard(true)
+        if not board then return end
+        ApplyIncomingBallot(board, scopeId, hash, rev, false, DecodeBallotVotes(encodedVotes), true)
+        FireCallbacks("GUILD_BOARD_CHANGED", board)
+
+    -- Backwards compatibility with v0.2 individual GB_VOTE / GB_ABSTAIN messages!
     elseif cmd == "GB_VOTE" then
         local scopeId, hash, designId, vote = parts[2], parts[3], parts[4], parts[5]
         if isSelf or not scopeId or not hash or not designId then return end
         local board = self:GetGuildBoard(true)
         if not board then return end
-        local ballots = GTV.Storage:GetBallotMap(board, scopeId)
-        ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
-        ballots[hash].abstained = false
-        ballots[hash].votes[designId] = (vote == "UP" or vote == "DOWN") and vote or nil
+        local normScope = GTV.Storage:NormalizeScopeId(scopeId)
+        local targetScopes = { normScope }
+        if normScope == GTV.Storage.DEFAULT_BOARD_SCOPE and board.timedPoll and board.timedPoll.id and board.timedPoll.keepExisting ~= false then
+            table.insert(targetScopes, board.timedPoll.id)
+        end
+        for _, sid in ipairs(targetScopes) do
+            local ballots = GTV.Storage:GetBallotMap(board, sid)
+            ballots[hash] = ballots[hash] or { rev = 0, abstained = false, votes = {} }
+            ballots[hash].abstained = false
+            ballots[hash].votes[designId] = (vote == "UP" or vote == "DOWN") and vote or nil
+        end
         FireCallbacks("GUILD_BOARD_CHANGED", board)
 
     elseif cmd == "GB_ABSTAIN" then
@@ -975,8 +1213,9 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
         if isSelf or not scopeId or not hash then return end
         local board = self:GetGuildBoard(true)
         if not board then return end
-        local ballots = GTV.Storage:GetBallotMap(board, scopeId)
-        ballots[hash] = ballots[hash] or { abstained = false, votes = {} }
+        local normScope = GTV.Storage:NormalizeScopeId(scopeId)
+        local ballots = GTV.Storage:GetBallotMap(board, normScope)
+        ballots[hash] = ballots[hash] or { rev = 0, abstained = false, votes = {} }
         ballots[hash].abstained = (flag == "1")
         if ballots[hash].abstained then
             wipe(ballots[hash].votes)
@@ -984,24 +1223,26 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
         FireCallbacks("GUILD_BOARD_CHANGED", board)
 
     elseif cmd == "GB_HELLO" then
-        local remoteDesigns = tonumber(parts[2]) or 0
-        local remotePollId = parts[3] or "0"
-        local remoteBallots = tonumber(parts[4]) or 0
-        local remoteVersion = parts[5]
         if isSelf then return end
+        -- Support both v0.3 ("GB_HELLO|<sig>|<version>") and v0.2 ("GB_HELLO|<d>|<p>|<b>|<version>")
+        local remoteSig, remoteVersion
+        if parts[5] then
+            remoteSig = "LEGACY"
+            remoteVersion = parts[5]
+        else
+            remoteSig = parts[2] or ""
+            remoteVersion = parts[3]
+        end
         if remoteVersion and not versionNotified and CompareVersions(remoteVersion, GTV.VERSION) then
             versionNotified = true
             GTV:Print(string.format(GTV.L.UPDATE_NEWER_FOUND, remoteVersion))
         end
         local board = self:GetGuildBoard(false)
         if not board then return end
-        local localDesigns, vCount, aCount = self:GetBoardStats()
-        local localPollId = (board.timedPoll and board.timedPoll.id) or "0"
-        local shouldReply = (localDesigns > remoteDesigns)
-            or (localPollId ~= "0" and localPollId ~= remotePollId)
-            or ((vCount + aCount) > remoteBallots)
-        if shouldReply then
-            local jitter = GTV:IsGuildLeader() and 0.2 or (0.6 + math.random() * 1.2)
+        local localSig = ComputeBoardSignature(board)
+        local hasData = (#board.designs > 0) or (board.timedPoll ~= nil) or (next(GTV.Storage:GetBallotMap(board)) ~= nil)
+        if hasData and remoteSig ~= localSig then
+            local jitter = GTV:IsGuildLeader() and 0.2 or (0.5 + math.random() * 1.1)
             C_Timer.After(jitter, function()
                 self:BroadcastGuildBoardSnapshot(board)
             end)
@@ -1045,7 +1286,11 @@ function Protocol:OnMessageReceived(payload, rawSender, isLocalTestEcho)
                 endsAt = endsAt,
                 status = status,
                 winnerDesignId = nil,
+                keepExisting = keepExisting,
             }
+            if keepExisting then
+                CarryOverBoardBallots(board, pollId)
+            end
             FireCallbacks("GUILD_BOARD_CHANGED", board)
             if self:IsTimedPollOpen(board.timedPoll) and not GTV.Storage:WasPollPrompted(pollId) then
                 GTV.Storage:MarkPollPrompted(pollId)

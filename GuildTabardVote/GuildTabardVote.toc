@@ -4,7 +4,7 @@
 ## Notes: Persistent guild tabard design board, live & timed multi-day anonymous voting (GM-only results), real-time 3D/2D sync, and saved designs.
 ## Notes-deDE: Gildenweites Wappen-Board, Live- & mehrtägige anonyme Abstimmungen (Auswertung nur für Gildenmeister), Live-3D/2D-Vorschau und Designs speichern/laden.
 ## Author: DaWasteh
-## Version: 0.2.0
+## Version: 0.3.0
 ## IconTexture: Interface\AddOns\GuildTabardVote\Media\icon
 ## Category: Guild
 ## Category-deDE: Gilde
